@@ -10,7 +10,7 @@
     },
     "main": "app.js",
     "scripts": {
-        "start": "node loader.js",
+        "start": "node loader.js --no-daemon --no-silent",
         "lint": "eslint --cache ./nodebb .",
         "test": "nyc --reporter=html --reporter=text-summary mocha",
         "coverage": "nyc report --reporter=text-lcov > ./coverage/lcov.info",
