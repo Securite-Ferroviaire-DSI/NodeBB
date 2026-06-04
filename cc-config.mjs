@@ -28,7 +28,7 @@ const config = {
     username: process.env.POSTGRESQL_ADDON_USER,
     password: process.env.POSTGRESQL_ADDON_PASSWORD,
     database: process.env.POSTGRESQL_ADDON_DB,
-    ssl: true
+    ssl: false
   }
 };
 
