@@ -10,7 +10,6 @@ const user = require('../user');
 const plugins = require('../plugins');
 const categories = require('../categories');
 const utils = require('../utils');
-const helpers = require('../controllers/helpers');
 
 module.exports = function (Posts) {
 	Posts.getPostSummaryByPids = async function (pids, uid, options) {
@@ -23,7 +22,9 @@ module.exports = function (Posts) {
 		options.escape = options.hasOwnProperty('escape') ? options.escape : false;
 		options.extraFields = options.hasOwnProperty('extraFields') ? options.extraFields : [];
 
-		const fields = ['pid', 'tid', 'toPid', 'url', 'content', 'sourceContent', 'uid', 'timestamp', 'deleted', 'upvotes', 'downvotes', 'replies', 'handle'].concat(options.extraFields);
+		// `uploads` is selected so parsing can size images without a second lookup,
+		// and is dropped again below to keep the summary payload unchanged
+		const fields = ['pid', 'tid', 'toPid', 'url', 'content', 'sourceContent', 'uid', 'timestamp', 'deleted', 'upvotes', 'downvotes', 'replies', 'handle', 'uploads'].concat(options.extraFields);
 
 		let posts = await Posts.getPostsFields(pids, fields);
 		posts = posts.filter(Boolean);
@@ -69,6 +70,9 @@ module.exports = function (Posts) {
 		posts = posts.filter(post => tidToTopic[post.tid]);
 
 		posts = await parsePosts(posts, options);
+		if (!options.extraFields.includes('uploads')) {
+			posts.forEach((post) => { post.uploads = undefined; });
+		}
 		const result = await plugins.hooks.fire('filter:post.getPostSummaryByPids', { posts: posts, uid: uid });
 		return result.posts;
 	};
@@ -86,9 +90,6 @@ module.exports = function (Posts) {
 			}
 			if (options.escape) {
 				post.content = post.content ? validator.escape(String(post.content)) : post.content;
-			}
-			if (post.category) {
-				post.category.name = await helpers.translateEscapedValue(post.category.name);
 			}
 			return post;
 		}));

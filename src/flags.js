@@ -2,7 +2,6 @@
 
 const _ = require('lodash');
 const winston = require('winston');
-const validator = require('validator');
 
 const activitypub = require('./activitypub');
 const db = require('./database');
@@ -382,7 +381,6 @@ async function modifyNotes(notes) {
 	const userData = await user.getUsersFields(uids, ['username', 'userslug', 'picture']);
 	return notes.map((note, idx) => {
 		note.user = userData[idx];
-		note.content = validator.escape(note.content);
 		return note;
 	});
 }
@@ -552,7 +550,7 @@ Flags.getReports = async function (flagId) {
 	const [reports, uids] = payload.reduce((memo, cur) => {
 		const value = cur.value.split(';');
 		memo[1].push(value.shift());
-		cur.value = validator.escape(String(value.join(';')));
+		cur.value = value.join(';');
 		memo[0].push(cur);
 
 		return memo;
@@ -695,7 +693,6 @@ Flags.canFlag = async function (type, id, uid, skipLimitCheck = false) {
 Flags.getTarget = async function (type, id, uid) {
 	if (type === 'user') {
 		const userData = await user.getUserData(id);
-		userData.aboutme = validator.escape(String(userData.aboutme));
 		return userData && userData.uid ? userData : {};
 	}
 	if (type === 'post') {
@@ -757,8 +754,9 @@ Flags.update = async function (flagId, uid, changeset) {
 		}
 		const notifObj = await notifications.create({
 			type: 'my-flags',
-			bodyShort: `[[notifications:flag-assigned-to-you, ${flagId}]]`,
+			bodyShort: translator.compile('notifications:flag-assigned-to-you', flagId),
 			path: `/flags/${flagId}`,
+			flagId: flagId,
 			nid: `flags:assign:${flagId}:uid:${assigneeId}`,
 			from: uid,
 		});
@@ -928,24 +926,25 @@ Flags.notify = async function (flagObj, uid, notifySelf = false) {
 	]);
 	let uids = admins.concat(globalMods);
 	let notifObj;
-
-	const { displayname } = flagObj.reports[flagObj.reports.length - 1].reporter;
-
+	const { reports } = flagObj;
+	const reporterUid = reports.at(-1)?.reporter?.uid ?? 0;
+	const displayname = await user.getNotificationDisplayname(reporterUid);
 	if (flagObj.type === 'post') {
+		const tid = await posts.getPostField(flagObj.targetId, 'tid');
 		const [title, cid] = await Promise.all([
-			topics.getTitleByPid(flagObj.targetId),
+			topics.getNotificationTitle(tid),
 			posts.getCidByPid(flagObj.targetId),
 		]);
 
 		const modUids = await categories.getModeratorUids([cid]);
-		const titleEscaped = utils.decodeHTMLEntities(title);
 
 		notifObj = await notifications.create({
 			type: 'new-post-flag',
-			bodyShort: translator.compile('notifications:user-flagged-post-in', displayname, titleEscaped),
+			bodyShort: translator.compile('notifications:user-flagged-post-in', displayname, title),
 			bodyLong: String(flagObj.target?.content || ''),
 			pid: flagObj.targetId,
 			path: `/flags/${flagObj.flagId}`,
+			flagId: flagObj.flagId,
 			nid: `flag:post:${flagObj.targetId}:${uid}`,
 			from: uid,
 			mergeId: `notifications:user-flagged-post-in|${flagObj.targetId}`,
@@ -953,12 +952,13 @@ Flags.notify = async function (flagObj, uid, notifySelf = false) {
 		});
 		uids = uids.concat(modUids[0]);
 	} else if (flagObj.type === 'user') {
-		const targetDisplayname = flagObj.target && flagObj.target.displayname ? flagObj.target.displayname : '[[global:guest]]';
+		const targetDisplayname = await user.getNotificationDisplayname(flagObj.targetId);
 		notifObj = await notifications.create({
 			type: 'new-user-flag',
-			bodyShort: `[[notifications:user-flagged-user, ${displayname}, ${targetDisplayname}]]`,
+			bodyShort: translator.compile('notifications:user-flagged-user', displayname, targetDisplayname),
 			bodyLong: await plugins.hooks.fire('filter:parse.raw', String(flagObj.description || '')),
 			path: `/flags/${flagObj.flagId}`,
+			flagId: flagObj.flagId,
 			nid: `flag:user:${flagObj.targetId}:${uid}`,
 			from: uid,
 			mergeId: `notifications:user-flagged-user|${flagObj.targetId}`,
@@ -977,6 +977,17 @@ Flags.notify = async function (flagObj, uid, notifySelf = false) {
 		uids = uids.filter(_uid => parseInt(_uid, 10) !== parseInt(uid, 10));
 	}
 	await notifications.push(notifObj, uids);
+};
+
+Flags.markNotificationsRead = async function (flagId, uid) {
+	if (!(parseInt(uid, 10) > 0)) {
+		return;
+	}
+	const nids = await user.notifications.getUnreadByField(uid, 'flagId', [flagId]);
+	if (nids.length) {
+		await notifications.markReadMultiple(nids, uid);
+		await user.notifications.pushCount(uid);
+	}
 };
 
 async function mergeBanHistory(history, targetUid, uids) {
@@ -1008,7 +1019,7 @@ async function mergeBanMuteHistory(history, uids, params) {
 			meta: [
 				{
 					key: params.label,
-					value: validator.escape(String(cur.reason || params.reasonDefault)),
+					value: cur.reason || params.reasonDefault,
 					labelClass: 'danger',
 				},
 				{

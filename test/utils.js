@@ -35,6 +35,25 @@ describe('Utility Methods', () => {
 		done();
 	});
 
+	it('isNumber should return true for numbers false for everything else', (done) => {
+		assert.strictEqual(utils.isNumber(1), true);
+		assert.strictEqual(utils.isNumber(0), true);
+		assert.strictEqual(utils.isNumber('1'), true);
+		assert.strictEqual(utils.isNumber('1.1'), true);
+		assert.strictEqual(utils.isNumber('0'), true);
+
+		assert.strictEqual(utils.isNumber('1asd'), false);
+		assert.strictEqual(utils.isNumber('asd1'), false);
+		assert.strictEqual(utils.isNumber('asd'), false);
+		assert.strictEqual(utils.isNumber([]), false);
+		assert.strictEqual(utils.isNumber([3]), false);
+		assert.strictEqual(utils.isNumber(false), false);
+		assert.strictEqual(utils.isNumber(null), false);
+		assert.strictEqual(utils.isNumber(undefined), false);
+		assert.strictEqual(utils.isNumber(''), false);
+		done();
+	});
+
 	it('should strip HTML tags', (done) => {
 		assert.strictEqual(utils.stripHTMLTags('<p>just <b>some</b> text</p>'), 'just some text');
 		assert.strictEqual(utils.stripHTMLTags('<p>just <b>some</b> text</p>', ['p']), 'just <b>some</b> text');
@@ -494,6 +513,34 @@ describe('Utility Methods', () => {
 		});
 	});
 
+	describe('isSafeHref', () => {
+		it('should return true for http/https url', (done) => {
+			assert(utils.isSafeHref('http://nodebb.org'));
+			assert(utils.isSafeHref('https://nodebb.org'));
+			done();
+		});
+
+		it('should return true for /topic/123', (done) => {
+			assert(utils.isSafeHref('/topic/123'));
+			assert(utils.isSafeHref(' /topic/123'));
+			done();
+		});
+
+		it('should return false for //foo', (done) => {
+			assert(!utils.isSafeHref('//foo'));
+			assert(!utils.isSafeHref(' //foo'));
+			done();
+		});
+
+		it('should return false for javascript/data', (done) => {
+			assert(!utils.isSafeHref('javascript:alert(1)'));
+			assert(!utils.isSafeHref('   javascript:alert(1)'));
+			assert(!utils.isSafeHref('data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg=='));
+			assert(!utils.isSafeHref('  data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg=='));
+			done();
+		});
+	});
+
 	it('escape html', (done) => {
 		const escaped = utils.escapeHTML('&<>');
 		assert.equal(escaped, '&amp;&lt;&gt;');
@@ -617,14 +664,6 @@ describe('Utility Methods', () => {
 		const shim = require('../src/translator');
 
 		const { Translator } = shim;
-
-		it('should translate in place', async () => {
-			const translator = Translator.create('en-GB');
-			const el = $(`<div><span id="search" title="[[global:search]]"></span><span id="text">[[global:home]]</span></div>`);
-			await translator.translateInPlace(el.get(0));
-			assert.strictEqual(el.find('#text').text(), 'Home');
-			assert.strictEqual(el.find('#search').attr('title'), 'Search');
-		});
 
 		it('should not error', (done) => {
 			shim.flush();

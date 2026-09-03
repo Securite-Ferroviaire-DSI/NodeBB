@@ -354,6 +354,10 @@ const utils = {
 	},
 
 	isNumber: function (n) {
+		const typeOf = typeof n;
+		if (typeOf !== 'number' && typeOf !== 'string') {
+			return false;
+		}
 		// `isFinite('') === true` so isNan parseFloat check is necessary
 		return !isNaN(parseFloat(n)) && isFinite(n);
 	},
@@ -364,8 +368,7 @@ const utils = {
 		}
 		// Basic PEM validation
 		return pem.startsWith('-----BEGIN PUBLIC KEY-----') &&
-			pem.trim().endsWith('-----END PUBLIC KEY-----') &&
-			pem.includes('MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA');
+			pem.trim().endsWith('-----END PUBLIC KEY-----');
 	},
 
 	languageKeyRegex: /\[\[[\w]+:.+\]\]/,
@@ -379,6 +382,7 @@ const utils = {
 			'fa-IR': 'fa',
 			'pt-BR': 'pt-br',
 			nb: 'no',
+			'nn-NO': 'no',
 		};
 		return mapping.hasOwnProperty(userLang) ? mapping[userLang] : userLang;
 	},
@@ -453,6 +457,13 @@ const utils = {
 		});
 	},
 
+	isSafeHref: function (href) {
+		const normalizedHref = String(href).trim().toLowerCase();
+		const isHttpUrl = normalizedHref.startsWith('https://') || normalizedHref.startsWith('http://');
+		const isRelativeUrl = normalizedHref.startsWith('/') && !normalizedHref.startsWith('//');
+		return isHttpUrl || isRelativeUrl;
+	},
+
 	// https://github.com/sindresorhus/is-absolute-url
 	isAbsoluteUrlRE: /^[a-zA-Z][a-zA-Z\d+\-.]*:/,
 	isWinPathRE: /^[a-zA-Z]:\\/,
@@ -465,6 +476,14 @@ const utils = {
 
 	isRelativeUrl: function (url) {
 		return !utils.isAbsoluteUrl(url);
+	},
+
+	cacheBustedUrl: function (url, updatedAt) {
+		if (!url || !updatedAt) {
+			return url;
+		}
+		const separator = url.includes('?') ? '&' : '?';
+		return `${url}${separator}v=${updatedAt}`;
 	},
 
 	makeNumberHumanReadable: function (num, toFixed = 1) {
@@ -526,7 +545,7 @@ const utils = {
 	},
 
 	escapeHTML: function (str) {
-		if (str == null) {
+		if (str == null || str === '') {
 			return '';
 		}
 		if (!str) {
@@ -710,6 +729,15 @@ const utils = {
 
 	rtrim: function (str) {
 		return str.replace(/\s+$/g, '');
+	},
+
+	maskToken: function (token) {
+		token = String(token || '');
+		if (!token) {
+			return '';
+		}
+
+		return `${token.slice(0, 4)}...${token.slice(-4)}`;
 	},
 
 	debounce: function (func, wait, immediate) {

@@ -84,7 +84,6 @@ module.exports = function (Categories) {
 		category = result.category;
 
 		await db.setObject(`category:${category.cid}`, category);
-
 		await db.sortedSetAddBulk([
 			['categories:cid', category.order, category.cid],
 			[`cid:${parentCid}:children`, category.order, category.cid],
@@ -232,6 +231,12 @@ module.exports = function (Categories) {
 	}
 
 	Categories.copyPrivilegesFrom = async function (fromCid, toCid, group, filter) {
+		// Guard against a non-numeric source (e.g. the "all categories" pseudo-cid). Its
+		// privilege sets do not exist, so every privilege held by the target would be treated
+		// as "not in source" and rescinded — turning a copy into a bulk revoke.
+		if (!utils.isNumber(fromCid) || !utils.isNumber(toCid)) {
+			throw new Error('[[error:invalid-data]]');
+		}
 		group = group || '';
 		let privsToCopy = privileges.categories.getPrivilegesByFilter(filter);
 

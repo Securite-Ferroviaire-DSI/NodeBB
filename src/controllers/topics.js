@@ -2,6 +2,7 @@
 
 const nconf = require('nconf');
 const path = require('path');
+const winston = require('winston');
 const qs = require('querystring');
 const validator = require('validator');
 
@@ -17,6 +18,12 @@ const utils = require('../utils');
 const analytics = require('../analytics');
 const activitypub = require('../activitypub');
 const translator = require('../translator');
+const cacheCreate = require('../cache/lru');
+const crosspostCache = cacheCreate({
+	name: 'crosspost',
+	max: 500,
+	ttl: 3600000,
+});
 
 const topicsController = module.exports;
 
@@ -134,10 +141,11 @@ topicsController.get = async function getTopic(req, res, next) {
 		p => parseInt(p.index, 10) === parseInt(Math.max(0, postIndex - 1), 10)
 	);
 
-	const [author, crossposts] = await Promise.all([
+	const [author, crossposts, canCrosspost] = await Promise.all([
 		user.getUserFields(topicData.uid, ['username', 'userslug']),
-		topics.crossposts.get(topicData.tid),
-		buildBreadcrumbs(topicData, settings.userLang),
+		topics.crossposts.get(topicData.tid, req.uid),
+		loadCrosspostPrivilege(req, topicData.cid),
+		buildBreadcrumbs(topicData),
 		addOldCategory(topicData, userPrivileges, settings.userLang),
 		addTags(topicData, req, res, currentPage, postAtIndex),
 		topics.increaseViewCount(req, tid),
@@ -147,6 +155,12 @@ topicsController.get = async function getTopic(req, res, next) {
 
 	topicData.author = author;
 	topicData.crossposts = crossposts;
+	topicData.canCrosspost = canCrosspost;
+
+	// not awaited on purpose so topic loading is not blocked
+	topics.crossposts.syncCrosspostedTopicCids(crossposts, topicData)
+		.catch(err => winston.error(err.stack));
+
 	topicData.pagination = pagination.create(currentPage, pageCount, req.query);
 	topicData.pagination.rel.forEach((rel) => {
 		rel.href = `${url}/topic/${topicData.slug}${rel.href}`;
@@ -211,8 +225,18 @@ async function markAsRead(req, tid) {
 	}
 }
 
-async function buildBreadcrumbs(topicData, userLang) {
-	await helpers.translateCategoryData([topicData.category], userLang);
+async function loadCrosspostPrivilege(req, excludeCid) {
+	excludeCid = String(excludeCid || '');
+	let cidsUserCanCrosspost = crosspostCache.get(`uid:${req.uid}`);
+	if (cidsUserCanCrosspost === undefined) {
+		const cids = await categories.getAllCidsFromSet('categories:cid');
+		cidsUserCanCrosspost = await privileges.categories.filterCids('topics:crosspost', cids, req.uid);
+		crosspostCache.set(`uid:${req.uid}`, cidsUserCanCrosspost);
+	}
+	return cidsUserCanCrosspost.some(cid => cid !== excludeCid);
+}
+
+async function buildBreadcrumbs(topicData) {
 	const breadcrumbs = [
 		{
 			text: topicData.category.name,
@@ -220,10 +244,10 @@ async function buildBreadcrumbs(topicData, userLang) {
 			cid: topicData.category.cid,
 		},
 		{
-			text: topicData.title,
+			text: translator.escape(topicData.title),
 		},
 	];
-	const parentCrumbs = await helpers.buildCategoryBreadcrumbs(topicData.category.parentCid, userLang);
+	const parentCrumbs = await helpers.buildCategoryBreadcrumbs(topicData.category.parentCid);
 	topicData.breadcrumbs = parentCrumbs.concat(breadcrumbs);
 }
 
@@ -232,7 +256,7 @@ async function addOldCategory(topicData, userPrivileges, userLang) {
 		topicData.oldCategory = await categories.getCategoryFields(
 			topicData.oldCid, ['cid', 'name', 'icon', 'bgColor', 'color', 'slug']
 		);
-		topicData.oldCategory.name = await helpers.translateEscapedValue(topicData.oldCategory.name, userLang);
+		topicData.oldCategory.name = await translator.translate(topicData.oldCategory.name, userLang);
 	}
 }
 
@@ -242,17 +266,14 @@ async function addTags(topicData, req, res, currentPage, postAtIndex) {
 		mainPost = await posts.getPostData(topicData.mainPid);
 	}
 
-	const title = getTitleFromTopic(topicData);
 	res.locals.metaTags = [
 		{
 			name: 'title',
-			content: title,
-			noEscape: true,
+			content: topicData.title,
 		},
 		{
 			property: 'og:title',
-			content: title,
-			noEscape: true,
+			content: topicData.title,
 		},
 		{
 			property: 'og:type',
@@ -272,18 +293,23 @@ async function addTags(topicData, req, res, currentPage, postAtIndex) {
 		},
 	];
 
+	if (!utils.isNumber(topicData.tid)) {
+		res.locals.metaTags.push({
+			name: 'robots',
+			content: 'noindex',
+		});
+	}
+
 	const description = getDescriptionFromPost(postAtIndex);
 	if (description) {
 		res.locals.metaTags.push(
 			{
 				name: 'description',
 				content: description,
-				noEscape: true,
 			},
 			{
 				property: 'og:description',
 				content: description,
-				noEscape: true,
 			},
 		);
 	}
@@ -295,7 +321,6 @@ async function addTags(topicData, req, res, currentPage, postAtIndex) {
 		{
 			rel: 'canonical',
 			href: `${url}/topic/${topicData.slug}${page}`,
-			noEscape: true,
 		},
 	];
 
@@ -331,22 +356,13 @@ async function addTags(topicData, req, res, currentPage, postAtIndex) {
 	}
 }
 
-function getTitleFromTopic(topic) {
-	// titleRaw is trasnslator.escape'd
-	const title = translator.unescape(String(topic.titleRaw));
-	return translator.escape(utils.escapeHTML(title));
-}
-
 function getDescriptionFromPost(post) {
 	let description = '';
 	if (post && post.content) {
-		// posts/parse.js calls translator.escape on post.content, unescape first then re-escape after stripping html tags
-		const content = translator.unescape(String(post.content));
-		description = utils.stripHTMLTags(utils.decodeHTMLEntities(content)).trim();
+		description = utils.stripHTMLTags(utils.decodeHTMLEntities(post.content)).trim();
 		if (description.length > 160) {
 			description = `${description.slice(0, 157)}...`;
 		}
-		description = translator.escape(utils.escapeHTML(description));
 		description = description.replace(/\n/g, ' ').trim();
 	}
 	return description;
@@ -367,7 +383,7 @@ async function addOGImageTags(res, topicData, postAtIndex) {
 		images.push(topicData.category.backgroundImage);
 	}
 	if (postAtIndex && postAtIndex.user && postAtIndex.user.picture) {
-		images.push(validator.unescape(postAtIndex.user.picture));
+		images.push(postAtIndex.user.picture);
 	}
 	images.forEach(path => addOGImageTag(res, path));
 }
@@ -439,15 +455,11 @@ topicsController.pagination = async function (req, res, next) {
 	if (!topic) {
 		return next();
 	}
-	const [userPrivileges, settings] = await Promise.all([
-		privileges.topics.get(tid, req.uid),
-		user.getSettings(req.uid),
-	]);
-
-	if (!userPrivileges.read || !privileges.topics.canViewDeletedScheduled(topic, userPrivileges)) {
+	if (!await privileges.topics.canRead(tid, req.uid)) {
 		return helpers.notAllowed(req, res);
 	}
 
+	const settings = await user.getSettings(req.uid);
 	const postCount = topic.postcount;
 	const pageCount = Math.max(1, Math.ceil(postCount / settings.postsPerPage));
 

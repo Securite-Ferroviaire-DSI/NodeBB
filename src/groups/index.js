@@ -176,9 +176,6 @@ Groups.get = async function (groupName, options) {
 		]));
 	}
 
-
-	const descriptionParsed = await plugins.hooks.fire('filter:parse.raw', String(groupData.description || ''));
-	groupData.descriptionParsed = descriptionParsed;
 	groupData.members = members;
 	groupData.membersNextStart = stop + 1;
 	groupData.isMember = isMember;

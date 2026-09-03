@@ -11,9 +11,10 @@ const socketHelpers = require('../socket.io/helpers');
 const websockets = require('../socket.io');
 const events = require('../events');
 
-exports.setDefaultPostData = function (reqOrSocket, data) {
-	data.uid = reqOrSocket.uid;
-	data.req = exports.buildReqObject(reqOrSocket, { ...data });
+exports.setDefaultPostData = function (req, data) {
+	data.uid = req.uid;
+	data.req = exports.buildReqObject(req, { ...data });
+	data.ip = req.ip;
 	data.timestamp = Date.now();
 	data.fromQueue = false;
 };
@@ -49,7 +50,9 @@ exports.buildReqObject = (req, payload) => {
 		path: referer.slice(referer.indexOf(host) + host.length),
 		baseUrl: req.baseUrl,
 		originalUrl: req.originalUrl,
-		headers: { ...headers },
+		headers: Object.fromEntries(
+			Object.entries(headers).filter(([key]) => key !== 'cookie'),
+		),
 	};
 };
 
@@ -115,12 +118,10 @@ exports.postCommand = async function (caller, command, eventName, notification, 
 		throw new Error('[[error:invalid-data]]');
 	}
 
-	if (!data.room_id) {
-		throw new Error(`[[error:invalid-room-id, ${data.room_id}]]`);
-	}
-	const [exists, deleted] = await Promise.all([
+	const [exists, { deleted, tid }, canRead] = await Promise.all([
 		posts.exists(data.pid),
-		posts.getPostField(data.pid, 'deleted'),
+		posts.getPostFields(data.pid, ['deleted', 'tid']),
+		privileges.posts.canRead(data.pid, caller.uid),
 	]);
 
 	if (!exists) {
@@ -130,6 +131,11 @@ exports.postCommand = async function (caller, command, eventName, notification, 
 	if (deleted) {
 		throw new Error('[[error:post-deleted]]');
 	}
+
+	if (!canRead) {
+		throw new Error('[[error:no-privileges]]');
+	}
+	data.room_id = `topic_${tid}`;
 
 	/*
 	hooks:

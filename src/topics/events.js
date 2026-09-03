@@ -1,6 +1,5 @@
 'use strict';
 
-const validator = require('validator');
 const _ = require('lodash');
 const nconf = require('nconf');
 const db = require('../database');
@@ -9,7 +8,7 @@ const user = require('../user');
 const posts = require('../posts');
 const categories = require('../categories');
 const plugins = require('../plugins');
-const translator = require('../translator');
+const tx = require('../translator');
 const privileges = require('../privileges');
 const utils = require('../utils');
 const helpers = require('../helpers');
@@ -55,7 +54,7 @@ Events._types = {
 	},
 	move: {
 		icon: 'fa-arrow-circle-right',
-		translation: async (event, language) => translateEventArgs(event, language, 'topic:user-moved-topic-from', renderUser(event), `${event.fromCategory.name}`, renderTimeago(event)),
+		translation: async (event, language) => translateEventArgs(event, language, 'topic:user-moved-topic-from', renderUser(event), renderCategory(event.fromCategory), renderTimeago(event)),
 	},
 	share: {
 		icon: 'fa-share-alt',
@@ -87,8 +86,10 @@ Events.init = async () => {
 
 async function translateEventArgs(event, language, prefix, ...args) {
 	const key = getTranslationKey(event, prefix);
-	const compiled = translator.compile.apply(null, [key, ...args]);
-	return utils.decodeHTMLEntities(await translator.translate(compiled, language));
+	const txArgs = args.map(arg => utils.escapeHTML(arg));
+	const compiled = tx.compile.apply(null, [key, ...txArgs]);
+	const translated = await tx.translateKey(compiled, [], language);
+	return posts.sanitize(utils.decodeHTMLEntities(translated));
 }
 
 async function translateSimple(event, language, prefix) {
@@ -115,10 +116,12 @@ function renderUser(event) {
 
 	const user = {
 		...event.user,
-		displayname: validator.escape(String(event.user.displayname)),
+		displayname: String(event.user.displayname),
+		userslug: String(event.user.userslug),
 	};
-
-	return `${helpers.buildAvatar(user, '16px', true)} <a href="${relative_path}/user/${user.userslug}">${user.displayname}</a>`;
+	const avatar = helpers.buildAvatar(user, '16px', true);
+	const link = `<a href="${relative_path}/user/${helpers.escape(user.userslug)}">${helpers.escape(user.displayname)}</a>`;
+	return `${avatar} ${link}`;
 }
 
 function renderCategory(category) {
@@ -198,6 +201,23 @@ async function modifyEvent({ uid, events }) {
 		getCategoryInfo(events.map(event => event.toCid).filter(Boolean)),
 		user.getSettings(uid),
 	]);
+
+	// Remove events whose fromCid/toCid the user cannot find
+	const allCids = _.uniq([
+		...events.map(e => e.fromCid).filter(Boolean),
+		...events.map(e => e.toCid).filter(Boolean),
+	]);
+	const allowedCids = await privileges.categories.filterCids('find', allCids, uid);
+	const allowedCidSet = new Set(allowedCids);
+	events = events.filter((e) => {
+		if (e.fromCid && !allowedCidSet.has(e.fromCid)) {
+			return false;
+		}
+		if (e.toCid && !allowedCidSet.has(e.toCid)) {
+			return false;
+		}
+		return true;
+	});
 
 	// Remove backlink events if backlinks are disabled
 	if (meta.config.topicBacklinks !== 1) {

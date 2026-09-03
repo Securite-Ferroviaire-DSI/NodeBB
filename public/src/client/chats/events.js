@@ -17,12 +17,14 @@ define('forum/chats/events', [
 		'event:chats.typing': onChatTyping,
 	};
 	let chatNavWrapper = null;
+	let chatMainWrapper = null;
 
 	let Chats = null;
 
 	Events.init = async function () {
 		Chats = await app.require('forum/chats');
 		chatNavWrapper = $('[component="chat/nav-wrapper"]');
+		chatMainWrapper = $('[component="chat/main-wrapper"]');
 		Events.removeListeners();
 		for (const [eventName, handler] of Object.entries(events)) {
 			socket.on(eventName, handler);
@@ -50,13 +52,19 @@ define('forum/chats/events', [
 				Chats.newMessage = data.self === 0;
 			}
 
-			messages.appendChatMessage($('[component="chat/message/content"]'), data.message);
+			messages.appendChatMessage(
+				chatMainWrapper.find('[component="chat/message/content"]'),
+				data.message
+			);
 		}
-		Chats.updateTeaser(data.roomId, {
-			content: utils.stripHTMLTags(utils.decodeHTMLEntities(data.message.content)),
-			user: data.message.fromUser,
-			timestampISO: data.message.timestampISO,
-		});
+
+		if (!data.message.system) {
+			Chats.updateTeaser(data.roomId, {
+				content: utils.stripHTMLTags(utils.decodeHTMLEntities(data.message.content)),
+				user: data.message.fromUser,
+				timestampISO: data.message.timestampISO,
+			});
+		}
 	}
 
 	function publicChatUnread(data) {
@@ -80,19 +88,22 @@ define('forum/chats/events', [
 
 	function onRoomRename(data) {
 		const roomEl = components.get('chat/recent/room', data.roomId);
+		const publicRoomEl = components.get('chat/public/room', data.roomId);
+
 		if (roomEl.length) {
 			const titleEl = roomEl.find('[component="chat/room/title"]');
 			ajaxify.data.roomName = data.newName;
-			titleEl.translateText(data.newName ? data.newName : ajaxify.data.usernames);
+			if (data.newName) {
+				titleEl.text(data.newName);
+			} else {
+				titleEl.translateText(ajaxify.data.usernames);
+			}
+		} else if (publicRoomEl.length) {
+			publicRoomEl.find('[component="chat/room/title"]').text(data.newName);
 		}
+
 		const titleEl = $(`[component="chat/main-wrapper"][data-roomid="${data.roomId}"] [component="chat/header/title"]`);
-		if (titleEl.length) {
-			titleEl.html(
-				data.newName ?
-					`<i class="fa ${ajaxify.data.icon} text-muted"></i> ${data.newName}` :
-					ajaxify.data.chatWithMessage
-			);
-		}
+		chatModule.updateRoomName(titleEl, ajaxify.data.icon, data.newName, data.chatWithMessage);
 	}
 
 	function markChatState({ roomId, state }) {

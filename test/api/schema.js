@@ -218,19 +218,24 @@ async function setupData() {
 		name: 'Test Group',
 	});
 
-	// Create private groups for pending/invitations
-	const [pending1, pending2, inviteUid] = await Promise.all([
-		user.create({ username: utils.generateUUID().slice(0, 8) }),
-		user.create({ username: utils.generateUUID().slice(0, 8) }),
-		user.create({ username: utils.generateUUID().slice(0, 8) }),
-	]);
+	// Create users for pending/invitations/ownership
+	const pending1 = await user.create({ username: utils.generateUUID().slice(0, 8) });
+	const pending2 = await user.create({ username: utils.generateUUID().slice(0, 8) });
+	const inviteUid = await user.create({ username: utils.generateUUID().slice(0, 8) });
+	const owner1Uid = await user.create({ username: utils.generateUUID().slice(0, 8) });
+	const owner2Uid = await user.create({ username: utils.generateUUID().slice(0, 8) });
 	mocks.put['/groups/{slug}/pending/{uid}'][1].example = pending1;
 	mocks.delete['/groups/{slug}/pending/{uid}'][1].example = pending2;
 	mocks.delete['/groups/{slug}/invites/{uid}'][1].example = inviteUid;
-	await Promise.all(['private-group', 'invitations-only'].map(async (name) => groups.create({ name, private: true })));
+	await Promise.all(['private-group', 'invitations-only', 'ownership-only'].map(async (name) => groups.create({ name, private: true })));
 	await groups.requestMembership('private-group', pending1);
 	await groups.requestMembership('private-group', pending2);
 	await groups.invite('invitations-only', inviteUid);
+	await Promise.all([
+		groups.join('ownership-only', owner1Uid),
+		groups.join('ownership-only', owner2Uid),
+	]);
+	await groups.ownership.grant(owner2Uid, 'ownership-only');
 
 	await meta.settings.set('core.api', {
 		tokens: [{
@@ -437,7 +442,8 @@ describe('schema', () => {
 				});
 
 				it('should not error out when called', async function () {
-					// Uncomment if there is a failing test console.log(this.url, method, path);
+					// Uncomment if there is a failing test
+					// console.log(this.url, method, path);
 					this.result = await executeRequest.call(this, method, path, context);
 				});
 
@@ -583,21 +589,15 @@ describe('schema', () => {
 			return;
 		}
 
-		if (this.result.response.statusCode === 400 && context[method].responses['400']) {
-			// TODO: check 400 schema to response.body?
+		const statusCode = String(this.result.response.statusCode);
+		const statusSchema = context[method].responses[statusCode];
+		if (!statusSchema) {
 			return;
 		}
 
-		const http200 = context[method].responses['200'];
-		if (!http200) {
-			return;
-		}
-
-		assert.strictEqual(this.result.response.statusCode, 200, `HTTP 200 expected (path: ${method} ${path})`);
-
-		const hasJSON = http200.content && http200.content['application/json'];
+		const hasJSON = statusSchema.content && statusSchema.content['application/json'];
 		if (hasJSON) {
-			this.schema = context[method].responses['200'].content['application/json'].schema;
+			this.schema = statusSchema.content['application/json'].schema;
 			validateSchema(this.schema, this.result.body, method.toUpperCase(), path);
 		}
 

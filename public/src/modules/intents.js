@@ -1,6 +1,7 @@
 'use strict';
 
-import { dialog } from 'bootbox';
+import { dialog } from 'modals';
+import * as Benchpress from 'benchpressjs';
 import { get } from 'api';
 import storage from 'storage';
 import { translate, translateKeys } from 'translator';
@@ -93,17 +94,21 @@ export async function refresh(handle) {
 }
 
 export async function register() {
+	if (!config.activitypub.enabled) {
+		return;
+	}
+
 	let map = list();
 	let handles = await Promise.all(Array.from(map.entries()).map(async ([handle, intents]) => ({
 		handle,
 		intents: (await mapIntentNames(intents)).join(', '),
 	})));
 
-	app.parseAndTranslate('modals/intents/register', {
+	Benchpress.render('modals/intents/register', {
 		description: '[[intents:description]]',
 		handles,
-	}, (html) => {
-		const modal = dialog({
+	}).then(async (html) => {
+		const modal = await dialog({
 			title: '[[intents:title]]',
 			message: html,
 		});
@@ -133,7 +138,7 @@ export async function register() {
 					handle,
 					intents: (await mapIntentNames(intents)).join(', '),
 				})));
-				const html = await app.parseAndTranslate('modals/intents/register', 'handles', { handles });
+				const html = await Benchpress.render('modals/intents/register', { handles });
 				modal.find('#intents-registered-list').html(html);
 			} catch (e) {
 				alerts.error(e.message);
@@ -163,6 +168,10 @@ const INTENTS_GUEST_SELECTORS = '[component="topic/reply/guest"], [component="ca
 
 // called by various init scripts in different pages' js to add handlers for "Log in to post" buttons, et al.
 export function addHandlers() {
+	if (!config.activitypub.enabled) {
+		return;
+	}
+
 	document.removeEventListener('click', _intentsHandler);
 	document.addEventListener('click', _intentsHandler, true); // capture phase
 }
@@ -189,6 +198,10 @@ function _intentsHandler(e) {
 }
 
 export async function trigger(intent, parameters) {
+	if (!config.activitypub.enabled) {
+		return;
+	}
+
 	const map = list();
 	const requiredIntent = intent.toLowerCase();
 	const displayKey = INTENT_DISPLAY_MAP[requiredIntent];
@@ -204,12 +217,12 @@ export async function trigger(intent, parameters) {
 		intents: (await mapIntentNames(intents)).join(', '),
 	})));
 
-	app.parseAndTranslate('modals/intents/trigger', {
+	Benchpress.render('modals/intents/trigger', {
 		displayIntent,
 		matchingHandles,
 		hasAnyHandles: map.size > 0,
-	}, (html) => {
-		const modal = dialog({
+	}).then(async (html) => {
+		const modal = await dialog({
 			title: `[[intents:trigger-title, ${displayIntent}]]`,
 			message: html,
 		});
@@ -235,7 +248,15 @@ export async function trigger(intent, parameters) {
 			url = url?.replaceAll(/\{[^}]+\}/g, '');
 
 			if (url) {
-				window.location.href = url;
+				// Validate URL scheme to prevent XSS via javascript: data: etc.
+				try {
+					const parsed = new URL(url);
+					if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+						window.location.href = url;
+					}
+				} catch (e) {
+					// Invalid URL, silently ignore
+				}
 			}
 		});
 

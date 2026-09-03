@@ -3,10 +3,12 @@
 import { get, post, del } from 'api';
 import { error } from 'alerts';
 import { render } from 'benchpress';
-import { alert, dialog } from 'bootbox';
+import { translate } from 'translator';
+import * as modals from 'modals';
 
 export function init() {
 	setupBlocklists();
+	setupCoreDomains();
 };
 
 function setupBlocklists() {
@@ -53,7 +55,7 @@ async function renderList(blocklists) {
 }
 
 function throwModal() {
-	render('admin/partials/activitypub/blocklists', {}).then(function (html) {
+	render('admin/partials/activitypub/blocklists/add', {}).then(async function (html) {
 		const submit = function () {
 			const formEl = modal.find('form').get(0);
 			if (!formEl.reportValidity()) {
@@ -69,7 +71,7 @@ function throwModal() {
 				}
 			}).catch(error);
 		};
-		const modal = bootbox.dialog({
+		const modal = await modals.dialog({
 			title: '[[admin/settings/activitypub:blocklists.add]]',
 			message: html,
 			buttons: {
@@ -97,15 +99,76 @@ async function refresh(url) {
 	}
 }
 
+function setupCoreDomains() {
+	const coreTable = document.getElementById('coreDomains');
+	if (coreTable) {
+		coreTable.addEventListener('click', (e) => {
+			const subselector = e.target.closest('[data-action]');
+			if (subselector) {
+				const action = subselector.getAttribute('data-action');
+				const row = subselector.closest('tr');
+				const domain = row.getAttribute('data-domain');
+				if (action === 'core.remove') {
+					removeDomain(domain);
+				}
+			}
+		});
+	}
+
+	const addBtn = document.querySelector('[data-action="core.add"]');
+	if (addBtn) {
+		addBtn.addEventListener('click', () => {
+			const input = document.getElementById('coreDomainInput');
+			const select = document.getElementById('coreSeveritySelect');
+			const domain = input.value.trim();
+			const severity = select.value;
+			if (!domain) {
+				return;
+			}
+			addDomain(domain, severity);
+			input.value = '';
+		});
+	}
+}
+
+async function addDomain(domain, severity = 'suspend') {
+	try {
+		const { domains } = await post('/admin/activitypub/blocklists/core', { domain, severity });
+		const tbody = document.querySelector('#coreDomains tbody');
+		if (!tbody) return;
+
+		const html = await app.parseAndTranslate('admin/federation/safety', 'domains', { domains });
+		$(tbody).html(html);
+	} catch (e) {
+		error(e);
+	}
+}
+
+async function removeDomain(domain) {
+	try {
+		const { domains } = await del(`/admin/activitypub/blocklists/core?domain=${encodeURIComponent(domain)}`);
+		const tbody = document.querySelector('#coreDomains tbody');
+		if (!tbody) return;
+
+		if (!domains.length) {
+			tbody.innerHTML = await translate(`<tr><td colspan="3" class="text-muted">[[admin/settings/activitypub:core-domains.empty]]</td></tr>`);
+			return;
+		}
+
+		const html = await app.parseAndTranslate('admin/federation/safety', 'domains', { domains });
+		$(tbody).html(html);
+	} catch (e) {
+		error(e);
+	}
+}
+
 async function view(url) {
-	console.log('ehjre');
 	try {
 		const { domains, count } = await get(`/admin/activitypub/blocklists/${encodeURIComponent(url)}`);
-		dialog({
+		const message = await app.parseAndTranslate('admin/partials/activitypub/blocklists/view', { count, domains });
+		modals.dialog({
 			title: '[[admin/settings/activitypub:blocklists.view.title]]',
-			message: `\
-				<p>[[admin/settings/activitypub:blocklists.view.intro, ${count}]]</p> \
-				<ul>` + domains.map(domain => `<li>${domain}</li>`).join('\n') + '</ul>',
+			message,
 		});
 	} catch (e) {
 		error(e);

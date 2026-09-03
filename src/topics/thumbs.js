@@ -8,6 +8,7 @@ const mime = require('mime').default;
 const plugins = require('../plugins');
 const posts = require('../posts');
 const meta = require('../meta');
+const file = require('../file');
 
 const topics = module.parent.exports;
 const Thumbs = module.exports;
@@ -36,7 +37,12 @@ Thumbs.load = async function (topicData, options = {}) {
 	const thumbsOnly = Object.hasOwn(options, 'thumbsOnly') ?
 		options.thumbsOnly :
 		meta.config.showPostUploadsAsThumbnails !== 1;
-	const thumbs = await loadFromTopicData(topicsWithThumbs, { thumbsOnly });
+	let thumbs = await loadFromTopicData(topicsWithThumbs, { thumbsOnly });
+	if (meta.config.privateUploads && parseInt(options.uid, 10) <= 0) {
+		thumbs = thumbs.map((thumbSet) => {
+			return thumbSet.filter(thumb => thumb && !thumb.url.startsWith(upload_url));
+		});
+	}
 
 	const tidToThumbs = _.zipObject(tidsWithThumbs, thumbs);
 	return topicData.map(t => (t && t.tid ? (tidToThumbs[t.tid] || []) : []));
@@ -171,7 +177,7 @@ Thumbs.filterThumbs = function (thumbs) {
 		}
 		// ensure it is in upload path
 		const fullPath = path.join(upload_path, thumb);
-		return fullPath.startsWith(upload_path);
+		return file.isPathInside(upload_path, fullPath);
 	});
 	return thumbs;
 };

@@ -30,6 +30,8 @@ module.exports = function (Topics) {
 			resolveTopicPostFlags(pids, uid),
 			activitypub.out.remove.context(uid, tid),
 			categories.updateRecentTidForCid(cid),
+			posts.getQueuedPosts({ tid }).then(items =>
+				Promise.all(items.map(item => posts.removeFromQueue(item.id)))),
 		]);
 	};
 
@@ -133,6 +135,8 @@ module.exports = function (Topics) {
 			deleteFromTags(deletedTopics),
 			Topics.events.purge(tidsToDelete),
 			Topics.crossposts.removeAll(tidsToDelete),
+			posts.getQueuedPosts({ tid: tidsToDelete }).then(items =>
+				Promise.all(items.map(item => posts.removeFromQueue(item.id)))),
 
 			reduceCounters(deletedTopics),
 		]);
@@ -228,12 +232,12 @@ module.exports = function (Topics) {
 			uniqCids.add(String(topic.cid));
 		}
 		await db.sortedSetRemoveBulk(bulkRemove);
-
+		const uniqTagsArray = Array.from(uniqTags);
 		await Topics.updateCategoryTagsCount(
 			Array.from(uniqCids),
-			Array.from(uniqTags)
+			uniqTagsArray
 		);
-		await Topics.updateTagCount(uniqTags);
+		await Topics.updateTagCount(uniqTagsArray);
 	}
 
 	async function reduceCounters(topicsData) {

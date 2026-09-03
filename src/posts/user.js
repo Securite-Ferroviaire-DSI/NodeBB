@@ -1,7 +1,6 @@
 'use strict';
 
 const async = require('async');
-const validator = require('validator');
 const _ = require('lodash');
 
 const db = require('../database');
@@ -26,10 +25,6 @@ module.exports = function (Posts) {
 		userData.forEach((userData, index) => {
 			userData.fullname = userSettings[index].showfullname ? userData.fullname || '' : undefined;
 			userData.selectedGroups = [];
-
-			if (meta.config.hideFullname) {
-				userData.fullname = undefined;
-			}
 		});
 
 		const result = await Promise.all(userData.map(async (userData) => {
@@ -57,7 +52,7 @@ module.exports = function (Posts) {
 
 	Posts.overrideGuestHandle = function (postData, handle) {
 		if (meta.config.allowGuestHandles && postData && postData.user && parseInt(postData.uid, 10) === 0 && handle) {
-			postData.user.username = validator.escape(String(handle));
+			postData.user.username = String(handle);
 			if (postData.user.hasOwnProperty('fullname')) {
 				postData.user.fullname = postData.user.username;
 			}

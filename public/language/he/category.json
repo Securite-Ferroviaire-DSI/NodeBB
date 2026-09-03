@@ -26,5 +26,10 @@
     "notwatching.message": "בחרת לא לעקוב אחר עדכונים בקטגוריה זו וכל תת-הקטגוריות",
     "ignoring.message": "בחרת להתעלם מעדכונים בקטגוריה זו וכל תת-הקטגוריות",
     "watched-categories": "קטגוריות במעקב",
-    "x-more-categories": "%1 קטגוריות נוספות"
+    "x-more-categories": "%1 קטגוריות נוספות",
+    "view-original": "צפייה במקור",
+    "first-run.welcome": "ברוכים הבאים לפורום NodeBB החדש שלכם!",
+    "first-run.description": "הפורום שלך מוכן לצאת לדרך. היכנסו כדי להתאים אישית את הקטגוריות, ההגדרות ועוד.",
+    "first-run.admin-panel": "תוכלו לנהל את הפורום שלכם דרך לוח הניהול",
+    "first-run.admin-panel-desc": "נגיש דרך סמליל גלגל השיניים בסרגל הצד"
 }

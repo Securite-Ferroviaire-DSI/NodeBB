@@ -10,10 +10,8 @@ const plugins = require('../../plugins');
 const meta = require('../../meta');
 const utils = require('../../utils');
 const privileges = require('../../privileges');
-const translator = require('../../translator');
 const messaging = require('../../messaging');
 const categories = require('../../categories');
-const posts = require('../../posts');
 const activitypub = require('../../activitypub');
 const flags = require('../../flags');
 const slugify = require('../../slugify');
@@ -55,10 +53,7 @@ helpers.getUserDataByUserSlug = async function (userslug, callerUID, query = {})
 		delete userData.reputation;
 	}
 
-	userData.age = Math.max(
-		0,
-		userData.birthday ? Math.floor((new Date().getTime() - new Date(userData.birthday).getTime()) / 31536000000) : 0
-	);
+	userData.age = Math.max(0, calculateAge(userData.birthday));
 
 	userData = await user.hidePrivateData(userData, callerUID);
 	userData.emailHidden = !userSettings.showemail;
@@ -151,11 +146,14 @@ helpers.getCustomUserFields = async function (callerUID, userData) {
 					require_valid_protocol: true,
 					require_tld: true,
 				});
+				if (isUrl && !utils.isSafeHref(value)) {
+					value = '';
+				}
 				memo.push({
 					key: slugify(name),
 					name,
 					value,
-					linkValue: validator.escape(String(value.replace('http://', '').replace('https://', ''))),
+					linkValue: value.replace('http://', '').replace('https://', ''),
 					type: isUrl ? 'input-link' : 'input-text',
 					'min-rep': '',
 					icon: 'fa-solid fa-circle-info',
@@ -195,7 +193,8 @@ helpers.getCustomUserFields = async function (callerUID, userData) {
 			userValue = JSON.parse(userValue || '[]');
 		}
 		if (f.type === 'input-link' && userValue) {
-			f.linkValue = validator.escape(String(userValue.replace('http://', '').replace('https://', '')));
+			userValue = utils.isSafeHref(userValue) ? userValue : '';
+			f.linkValue = String(userValue.replace('http://', '').replace('https://', ''));
 		}
 		f['select-options'] = (f['select-options'] || '').split('\n').filter(Boolean);
 		if (f.type === 'select') {
@@ -213,7 +212,7 @@ helpers.getCustomUserFields = async function (callerUID, userData) {
 			if (Array.isArray(userValue)) {
 				userValue = userValue.join(', ');
 			}
-			f.value = translator.escape(validator.escape(String(userValue)));
+			f.value = String(userValue);
 		}
 	});
 	return fields;
@@ -346,19 +345,30 @@ async function getProfileMenu(uid, callerUID) {
 	return data;
 }
 
+function calculateAge(birthday) {
+	if (!birthday) {
+		return 0;
+	}
+	const birthDate = new Date(birthday);
+	const today = new Date();
+	let age = today.getFullYear() - birthDate.getFullYear();
+	const hasHadBirthdayThisYear = (
+		today.getMonth() > birthDate.getMonth() ||
+		(today.getMonth() === birthDate.getMonth() && today.getDate() >= birthDate.getDate())
+	);
+	if (!hasHadBirthdayThisYear) {
+		age -= 1;
+	}
+	return age;
+}
+
 async function parseAboutMe(userData) {
 	if (!userData.aboutme) {
 		userData.aboutme = '';
 		userData.aboutmeParsed = '';
 		return;
-	} else if (activitypub.helpers.isUri(userData.uid)) {
-		userData.aboutme = posts.sanitize(userData.aboutme);
-		userData.aboutmeParsed = userData.aboutme;
-		return;
 	}
-	const parsed = await plugins.hooks.fire('filter:parse.aboutme', String(userData.aboutme || ''));
-	userData.aboutme = translator.escape(userData.aboutme);
-	userData.aboutmeParsed = translator.escape(parsed);
+	userData.aboutmeParsed = await plugins.hooks.fire('filter:parse.aboutme', String(userData.aboutme || ''));
 }
 
 function filterLinks(links, states) {

@@ -5,6 +5,7 @@ const db = require('../../database');
 const Intents = module.exports;
 
 const activitypub = require('../../activitypub');
+const meta = require('../../meta');
 
 const helpers = require('../helpers');
 
@@ -20,7 +21,11 @@ async function checkRateLimit(ip) {
 	await db.pexpire(key, RATE_LIMIT_WINDOW);
 }
 
-Intents.query = async (req, res) => {
+Intents.query = async (req, res, next) => {
+	if (!meta.config.activitypubEnabled) {
+		return next();
+	}
+
 	const ip = req.ip || req.connection.remoteAddress;
 	await checkRateLimit(ip);
 
@@ -38,6 +43,15 @@ Intents.query = async (req, res) => {
 	intents = webfinger._raw.links.reduce((memo, link) => {
 		if (link.rel.startsWith(prefix)) {
 			const intent = link.rel.slice(prefix.length).toLowerCase();
+			// Reject non-http/https URLs to prevent XSS via javascript: data: etc.
+			try {
+				const parsed = new URL(link.template);
+				if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+					return memo; // silently skip untrusted schemes
+				}
+			} catch (e) {
+				return memo; // invalid URL, skip
+			}
 			memo[intent] = link.template;
 		}
 		return memo;

@@ -7,7 +7,6 @@ const _ = require('lodash');
 
 const meta = require('../meta');
 const plugins = require('../plugins');
-const translator = require('../translator');
 const utils = require('../utils');
 const postCache = require('./cache');
 const devMode = process.env.NODE_ENV === 'development';
@@ -20,13 +19,14 @@ let sanitizeConfig = {
 	]),
 	allowedAttributes: {
 		...sanitize.defaults.allowedAttributes,
-		a: ['href', 'name', 'hreflang', 'media', 'rel', 'target', 'type'],
-		img: ['alt', 'height', 'ismap', 'src', 'usemap', 'width', 'srcset'],
+		a: ['href', 'name', 'hreflang', 'media', 'rel', 'target', 'type', 'component'],
+		img: ['alt', 'height', 'ismap', 'src', 'usemap', 'width', 'srcset', 'component'],
 		iframe: ['height', 'name', 'src', 'width', 'allow', 'frameborder'],
 		video: ['autoplay', 'playsinline', 'controls', 'height', 'loop', 'muted', 'poster', 'preload', 'src', 'width'],
 		audio: ['autoplay', 'controls', 'loop', 'muted', 'preload', 'src'],
 		source: ['type', 'src', 'srcset', 'sizes', 'media', 'height', 'width'],
 		embed: ['height', 'src', 'type', 'width'],
+		span: ['component'],
 	},
 	nonBooleanAttributes: ['accesskey', 'class', 'contenteditable', 'dir',
 		'draggable', 'dropzone', 'hidden', 'id', 'lang', 'spellcheck', 'style',
@@ -62,7 +62,6 @@ module.exports = function (Posts) {
 			postData.content = postData.content.replace(meta.config.activitypubBreakString, '');
 		}
 		({ postData } = await plugins.hooks.fire('filter:parse.post', { postData, type }));
-		postData.content = translator.escape(postData.content);
 		if (postData.pid) {
 			cache.set(cacheKey, postData.content);
 		}
@@ -78,7 +77,6 @@ module.exports = function (Posts) {
 	Posts.parseSignature = async function (userData, uid) {
 		userData.signature = sanitizeSignature(userData.signature || '');
 		const result = await plugins.hooks.fire('filter:parse.signature', { userData: userData, uid: uid });
-		userData.signature = translator.escape(result.userData.signature);
 		return result;
 	};
 
@@ -167,7 +165,6 @@ module.exports = function (Posts) {
 	};
 
 	function sanitizeSignature(signature) {
-		signature = translator.escape(signature);
 		const tagsToStrip = [];
 
 		if (meta.config['signatures:disableLinks']) {

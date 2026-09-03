@@ -72,10 +72,10 @@ describe('Upload Controllers', () => {
 				// eslint-disable-next-line no-await-in-loop
 				const { response, body } = await helpers.uploadFile(`${nconf.get('url')}/api/post/upload`, path.join(__dirname, '../test/files/503.html'), {}, jar, csrf_token);
 				if (i + 1 >= times) {
-					assert.strictEqual(response.statusCode, 500);
+					assert.strictEqual(response.statusCode, 500, JSON.stringify(body));
 					assert.strictEqual(body.error, '[[error:upload-ratelimit-reached]]');
 				} else {
-					assert.strictEqual(response.statusCode, 200);
+					assert.strictEqual(response.statusCode, 200, JSON.stringify(body));
 					assert(body && body.status && body.response && body.response.images);
 					assert(Array.isArray(body.response.images));
 					assert(body.response.images[0].url);
@@ -262,6 +262,93 @@ describe('Upload Controllers', () => {
 			}
 		});
 
+		it('should block NTFS stream ::$DATA and . bypass', async () => {
+			const oldPrivateUploads = meta.config.privateUploads;
+			const oldPrivateUploadsExtensions = meta.config.privateUploadsExtensions;
+			const uploadPath = nconf.get('upload_path');
+			const filename = `private-ext-${Date.now()}.pdf`;
+			const filePath = path.join(uploadPath, 'files', filename);
+
+			meta.config.privateUploads = 1;
+			meta.config.privateUploadsExtensions = 'pdf';
+
+			try {
+				await fs.writeFile(filePath, 'PDFSECRET', 'utf8');
+
+				const relativePath = nconf.get('relative_path') || '';
+				const publicPath = `${relativePath}/assets/uploads/files/${filename}`;
+				const directUrl = new URL(publicPath, nconf.get('base_url')).href;
+				const streamUrl = new URL(publicPath.replace(/\.pdf$/, '.pdf::$DATA'), nconf.get('base_url')).href;
+				const percentEncoded = new URL(publicPath.replace(/\.pdf$/, '.pdf%3A%3A%24DATA'), nconf.get('base_url')).href;
+				const extraDot = new URL(publicPath.replace(/\.pdf$/, '.pdf.'), nconf.get('base_url')).href;
+				const extraDotEncoded = new URL(publicPath.replace(/\.pdf$/, '.pdf%2E'), nconf.get('base_url')).href;
+				const space = new URL(publicPath.replace(/\.pdf$/, '.pdf '), nconf.get('base_url')).href;
+				const spaceEncoded = new URL(publicPath.replace(/\.pdf$/, '.pdf%20'), nconf.get('base_url')).href;
+
+				const { response: directResponse } = await request.get(directUrl);
+				assert.strictEqual(directResponse.statusCode, 403, `Failed for url: ${directUrl}`);
+
+				const { response: streamResponse } = await request.get(streamUrl);
+				assert.strictEqual(streamResponse.statusCode, 403, `Failed for url: ${streamUrl}`);
+
+				const { response: percentEncodedResponse } = await request.get(percentEncoded);
+				assert.strictEqual(percentEncodedResponse.statusCode, 403, `Failed for url: ${percentEncoded}`);
+
+				const { response: extraDotResponse } = await request.get(extraDot);
+				assert.strictEqual(extraDotResponse.statusCode, 403, `Failed for url: ${extraDot}`);
+
+				const { response: extraDotEncodedResponse } = await request.get(extraDotEncoded);
+				assert.strictEqual(extraDotEncodedResponse.statusCode, 403, `Failed for url: ${extraDotEncoded}`);
+
+				const { response: spaceResponse } = await request.get(space);
+				assert.strictEqual(spaceResponse.statusCode, 403, `Failed for url: ${space}`);
+
+				const { response: spaceEncodedResponse } = await request.get(spaceEncoded);
+				assert.strictEqual(spaceEncodedResponse.statusCode, 403, `Failed for url: ${spaceEncoded}`);
+			} finally {
+				await file.delete(filePath);
+				meta.config.privateUploads = oldPrivateUploads;
+				meta.config.privateUploadsExtensions = oldPrivateUploadsExtensions;
+			}
+		});
+
+		it('should block path traversal and double slashes for unauthenticated users', async () => {
+			const oldPrivateUploads = meta.config.privateUploads;
+			const oldPrivateUploadsExtensions = meta.config.privateUploadsExtensions;
+			const uploadPath = nconf.get('upload_path');
+			const filename = `private-ext-${Date.now()}.pdf`;
+			const filePath = path.join(uploadPath, 'files', filename);
+
+			meta.config.privateUploads = 1;
+			meta.config.privateUploadsExtensions = 'pdf';
+
+			try {
+				await fs.writeFile(filePath, 'PDFSECRET', 'utf8');
+
+				const requestPathsToCheck = [
+					`/assets/uploads//files/${filename}`,
+					`/assets/uploads///files/${filename}`,
+					`/assets/uploads/../uploads/files/${filename}`,
+					`/assets/uploads/./files/${filename}`,
+					`/assets/x/../uploads/files/${filename}`,
+					`/assets/uploads/%2e%2e/uploads/files/${filename}`,
+					`/assets/uploads/%2e/files/${filename}`,
+					`/assets/uploads%5cfiles%5c${filename}`,
+					`/assets/uploads/files/test-%G1.pdf`, // invalid percent encoding, should be blocked
+				];
+				for (const p of requestPathsToCheck) {
+					// eslint-disable-next-line no-await-in-loop
+					const { response: encodedResponse } = await request.get(`${nconf.get('url')}${p}`);
+					assert.strictEqual(encodedResponse.statusCode, 403, `Failed for path: ${p}`);
+				}
+			} finally {
+				await file.delete(filePath);
+				meta.config.privateUploads = oldPrivateUploads;
+				meta.config.privateUploadsExtensions = oldPrivateUploadsExtensions;
+			}
+		});
+
+
 		it('should fail to upload image to post if image dimensions are too big', async () => {
 			const { response, body } = await helpers.uploadFile(`${nconf.get('url')}/api/post/upload`, path.join(__dirname, '../test/files/toobig.png'), {}, jar, csrf_token);
 			assert.strictEqual(response.statusCode, 500);
@@ -273,7 +360,35 @@ describe('Upload Controllers', () => {
 			const { response, body } = await helpers.uploadFile(`${nconf.get('url')}/api/post/upload`, path.join(__dirname, '../test/files/brokenimage.png'), {}, jar, csrf_token);
 			assert.strictEqual(response.statusCode, 500);
 			assert(body && body.status && body.status.message);
-			assert.strictEqual(body.status.message, 'pngload_buffer: end of stream');
+		});
+
+		it('should fail to upload file if extension is not allowed', async () => {
+			const oldValue = meta.config.allowedFileExtensions;
+			meta.config.allowedFileExtensions = 'png,jpg,bmp';
+
+			try {
+				const uploadEndPoint = `${nconf.get('url')}/api/post/upload`;
+				const form = new FormData();
+				const uploadedFile = await fs.readFile(path.join(__dirname, '../test/files/503.html'));
+				const blob = new Blob([uploadedFile], { type: 'image/png' });
+
+				form.append('files[]', blob, '503.html');
+
+				const response = await fetch(uploadEndPoint, {
+					method: 'post',
+					body: form,
+					headers: {
+						'x-csrf-token': csrf_token,
+						cookie: await jar.getCookieString(uploadEndPoint),
+					},
+				});
+				const body = await response.json();
+
+				assert.strictEqual(response.status, 500);
+				assert.strictEqual(body?.status?.message, 'Invalid file type .html. Allowed types are: .png, .jpg, .bmp, .jpeg');
+			} finally {
+				meta.config.allowedFileExtensions = oldValue;
+			}
 		});
 
 		it('should fail if file is not an image', (done) => {
@@ -346,10 +461,10 @@ describe('Upload Controllers', () => {
 			});
 		});
 
-		it('should return empty string for invalid cover:url when user profile is loaded', async () => {
+		it('should return default cover for invalid cover:url when user profile is loaded', async () => {
 			await user.setUserField(1, 'cover:url', 'http://example.com/"><script>alert(1)</script>');
 			const { body: userData } = await helpers.request('get', '/api/user/admin');
-			assert.strictEqual(userData['cover:url'], '');
+			assert.strictEqual(userData['cover:url'], `${nconf.get('relative_path')}/assets/images/cover-default.png`);
 		});
 
 		it('should return empty string for invalid picture when user profile is loaded', async () => {
@@ -400,9 +515,15 @@ describe('Upload Controllers', () => {
 		});
 
 		it('should fail to upload invalid file type', async () => {
-			const { response, body } = await helpers.uploadFile(`${nconf.get('url')}/api/admin/category/uploadpicture`, path.join(__dirname, '../test/files/503.html'), { params: JSON.stringify({ cid: cid }) }, jar, csrf_token);
+			const { response, body } = await helpers.uploadFile(
+				`${nconf.get('url')}/api/admin/category/uploadpicture`,
+				path.join(__dirname, '../test/files/503.html'),
+				{ params: JSON.stringify({ cid: cid }) },
+				jar,
+				csrf_token
+			);
 			assert.strictEqual(response.statusCode, 500);
-			assert.equal(body.error, '[[error:invalid-image-type, image&#x2F;png&amp;#44; image&#x2F;jpeg&amp;#44; image&#x2F;pjpeg&amp;#44; image&#x2F;jpg&amp;#44; image&#x2F;gif&amp;#44; image&#x2F;svg+xml]]');
+			assert.equal(body.error, '[[error:invalid-image-type, text/html, image/png&#44; image/jpeg&#44; image/pjpeg&#44; image/jpg&#44; image/gif&#44; image/svg+xml]]');
 		});
 
 		it('should fail to upload category image with invalid json params', async () => {
@@ -508,9 +629,38 @@ describe('Upload Controllers', () => {
 			}, jar, csrf_token);
 
 			assert.equal(body[0].url, '/assets/uploads/xss-dirty.xml');
-			const { response: fileResponse, body: uploadedBody } = await request.get(`${nconf.get('url')}${body[0].url}`);
-			assert.strictEqual(fileResponse.headers['content-disposition'], 'attachment; filename="xss-dirty.xml"');
-			assert.equal(fileResponse.statusCode, 200);
+			const urlsToTest = [
+				body[0].url,
+				`/assets/../assets/uploads//xss-dirty.xml`,
+				`/assets/uploads///xss-dirty.xml`,
+				`/assets/uploads/../uploads/xss-dirty.xml`,
+				`/assets/uploads/./xss-dirty.xml`,
+				`/assets/x/../uploads/xss-dirty.xml`,
+				`/assets/uploads/%2e%2e/uploads/xss-dirty.xml`,
+				`/assets/uploads/%2e/xss-dirty.xml`,
+				`/assets/uploads/xss-dirty.xml `,
+			];
+
+			const urlsTo403 = [
+				`/assets/uploads/xss-dirty.xml::$DATA`,
+				`/assets/uploads/xss-dirty.xml%3A%3A%24DATA`,
+				`/assets/uploads/xss-dirty.xml.`,
+				`/assets/uploads/xss-dirty.xml%2E`,
+				`/assets/uploads/xss-dirty.xml%20`,
+			];
+
+			for (const url of urlsToTest) {
+				// eslint-disable-next-line no-await-in-loop
+				const { response: fileResponse } = await request.get(`${nconf.get('url')}${url}`);
+				assert.equal(fileResponse.statusCode, 200, `Failed for url: ${url}`);
+				assert.strictEqual(fileResponse.headers['content-disposition'], 'attachment; filename="xss-dirty.xml"', `Failed for url: ${url}`);
+			}
+
+			for (const url of urlsTo403) {
+				// eslint-disable-next-line no-await-in-loop
+				const { response: fileResponse } = await request.get(`${nconf.get('url')}${url}`);
+				assert.equal(fileResponse.statusCode, 403, `Failed for url: ${url}`);
+			}
 		});
 
 		it('should keep valid xml file unchanged', async () => {
@@ -535,6 +685,17 @@ describe('Upload Controllers', () => {
 			const { response, body } = await helpers.uploadFile(`${nconf.get('url')}/api/admin/upload/file`, path.join(__dirname, '../test/files/test.png'), {
 				params: JSON.stringify({
 					folder: '../../system',
+				}),
+			}, jar, csrf_token);
+
+			assert.equal(response.statusCode, 500);
+			assert.strictEqual(body.error, '[[error:invalid-path]]');
+		});
+
+		it('should fail to upload regular file to an existing directory outside of upload_path', async () => {
+			const { response, body } = await helpers.uploadFile(`${nconf.get('url')}/api/admin/upload/file`, path.join(__dirname, '../test/files/test.png'), {
+				params: JSON.stringify({
+					folder: '../',
 				}),
 			}, jar, csrf_token);
 

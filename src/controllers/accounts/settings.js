@@ -51,6 +51,7 @@ settingsController.get = async function (req, res, next) {
 	userData.bootswatchSkinOptions = bsSkinOptions;
 	userData.notificationSettings = notificationSettings;
 	userData.disableEmailSubscriptions = meta.config.disableEmailSubscriptions;
+	userData.disableNotificationEmails = meta.config.disableNotificationEmails;
 
 	userData.dailyDigestFreqOptions = [
 		{ value: 'off', name: '[[user:digest-off]]', selected: userData.settings.dailyDigestFreq === 'off' },
@@ -80,7 +81,7 @@ settingsController.get = async function (req, res, next) {
 	];
 
 	userData.upvoteNotifFreq = notifFreqOptions.map(
-		name => ({ name: name, selected: name === userData.settings.upvoteNotifFreq })
+		name => ({ name: name, label: `user:upvote-notif-freq.${name}`, selected: name === userData.settings.upvoteNotifFreq })
 	);
 
 	userData.categoryWatchState = { [userData.settings.categoryWatchState]: true };

@@ -2,8 +2,8 @@
 
 
 define('admin/settings', [
-	'uploader', 'mousetrap', 'hooks', 'alerts', 'settings', 'bootstrap', 'admin/modules/relogin-timer',
-], function (uploader, mousetrap, hooks, alerts, settings, bootstrap, reloginTimer) {
+	'uploader', 'mousetrap', 'hooks', 'alerts', 'settings', 'bootstrap', 'admin/modules/relogin-timer', 'helpers',
+], function (uploader, mousetrap, hooks, alerts, settings, bootstrap, reloginTimer, helpers) {
 	const Settings = {};
 
 	Settings.populateTOC = function () {
@@ -21,7 +21,7 @@ define('admin/settings', [
 				if (anchor.startsWith('section')) {
 					$this.parent().attr('id', anchor);
 				}
-				tocList.append(`<a class="btn btn-ghost btn-sm text-xs text-start text-decoration-none" href="#${anchor}">${header}</a>`);
+				tocList.append(`<a class="btn btn-ghost btn-sm text-xs text-start text-decoration-none" href="#${helpers.escape(anchor)}">${helpers.escape(header)}</a>`);
 			});
 			const offset = mainHader.outerHeight(true);
 			// https://stackoverflow.com/a/11814275/583363
@@ -104,7 +104,7 @@ define('admin/settings', [
 				if (err) {
 					return alerts.alert({
 						alert_id: 'config_status',
-						timeout: 5000,
+						timeout: 10000,
 						title: '[[admin/admin:changes-not-saved]]',
 						message: `[[admin/admin:changes-not-saved-message, ${err.message}]]`,
 						type: 'danger',

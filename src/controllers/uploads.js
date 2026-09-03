@@ -1,8 +1,8 @@
 'use strict';
 
 const path = require('path');
+const { fileTypeFromFile } = require('file-type');
 const nconf = require('nconf');
-const validator = require('validator');
 
 const user = require('../user');
 const meta = require('../meta');
@@ -16,14 +16,8 @@ const helpers = require('./helpers');
 const uploadsController = module.exports;
 
 uploadsController.upload = async function (req, res, filesIterator) {
-	let files;
-	try {
-		files = req.files;
-	} catch (e) {
-		return helpers.formatApiResponse(400, res);
-	}
+	const { files } = req;
 
-	// These checks added because of odd behaviour by request: https://github.com/request/request/issues/2445
 	if (!Array.isArray(files)) {
 		return helpers.formatApiResponse(500, res, new Error('[[error:invalid-file]]'));
 	}
@@ -32,6 +26,7 @@ uploadsController.upload = async function (req, res, filesIterator) {
 		const images = [];
 		for (const fileObj of files) {
 			/* eslint-disable no-await-in-loop */
+			await validateFileExtension(fileObj);
 			images.push(await filesIterator(fileObj));
 		}
 
@@ -40,14 +35,13 @@ uploadsController.upload = async function (req, res, filesIterator) {
 		return images;
 	} catch (err) {
 		return helpers.formatApiResponse(500, res, err);
-	} finally {
-		deleteTempFiles(files);
 	}
 };
 
 uploadsController.uploadPost = async function (req, res) {
 	await uploadsController.upload(req, res, async (uploadedFile) => {
-		const isImage = uploadedFile.type.match(/image./);
+		const detected = await fileTypeFromFile(uploadedFile.path);
+		const isImage = detected && detected.mime.startsWith('image/');
 		if (isImage) {
 			return await uploadAsImage(req, uploadedFile);
 		}
@@ -124,14 +118,20 @@ async function resizeImage(fileObj) {
 
 uploadsController.uploadThumb = async function (req, res) {
 	if (!meta.config.allowTopicsThumbnail) {
-		deleteTempFiles(req.files);
 		return helpers.formatApiResponse(503, res, new Error('[[error:topic-thumbnails-are-disabled]]'));
+	}
+	const canUpload = await privileges.global.can('upload:post:image', req.uid);
+	if (!canUpload) {
+		throw new Error('[[error:no-privileges]]');
 	}
 
 	return await uploadsController.upload(req, res, async (uploadedFile) => {
-		if (!uploadedFile.type.match(/image./)) {
+		const detected = await fileTypeFromFile(uploadedFile.path);
+		const isImage = detected && detected.mime.startsWith('image/');
+		if (!isImage) {
 			throw new Error('[[error:invalid-file]]');
 		}
+
 		await image.isFileTypeAllowed(uploadedFile.path);
 		const dimensions = await image.checkDimensions(uploadedFile.path);
 
@@ -175,17 +175,6 @@ uploadsController.uploadFile = async function (uid, uploadedFile) {
 		throw new Error(`[[error:file-too-big, ${meta.config.maximumFileSize}]]`);
 	}
 
-	const allowed = file.allowedExtensions();
-	const blocked = file.blockedExtensions();
-
-	const extension = path.extname(uploadedFile.name).toLowerCase();
-	if (allowed.length > 0 && (!extension || extension === '.' || !allowed.includes(extension))) {
-		throw new Error(`[[error:invalid-file-type, ${allowed.join('&#44; ')}]]`);
-	}
-	if (blocked.length > 0 && (!extension || extension === '.' || blocked.includes(extension))) {
-		throw new Error(`[[error:blocked-file-type, ${extension || 'unknown'}]]`);
-	}
-
 	return await saveFileToLocal(uid, 'files', uploadedFile);
 };
 
@@ -193,7 +182,7 @@ async function saveFileToLocal(uid, folder, uploadedFile) {
 	const name = uploadedFile.name || 'upload';
 	const extension = path.extname(name) || '';
 
-	const filename = `${Date.now()}-${validator.escape(name.slice(0, -extension.length)).slice(0, 255)}${extension}`;
+	const filename = `${Date.now()}-${name.slice(0, -extension.length).slice(0, 255)}${extension}`;
 
 	const upload = await file.saveFileToLocal(filename, folder, uploadedFile.path);
 	const storedFile = {
@@ -211,9 +200,24 @@ async function saveFileToLocal(uid, folder, uploadedFile) {
 	return data.storedFile;
 }
 
-function deleteTempFiles(files) {
-	if (Array.isArray(files)) {
-		files.forEach(fileObj => file.delete(fileObj.path));
+async function validateFileExtension(uploadedFile) {
+	const allowed = file.allowedExtensions();
+	const blocked = file.blockedExtensions();
+	function validateExtension(extension) {
+		if (allowed.length > 0 && (!extension || extension === '.' || !allowed.includes(extension))) {
+			throw new Error(`[[error:invalid-file-type, ${extension}, ${allowed.join('&#44; ')}]]`);
+		}
+		if (blocked.length > 0 && (!extension || extension === '.' || blocked.includes(extension))) {
+			throw new Error(`[[error:blocked-file-type, ${extension || 'unknown'}]]`);
+		}
+	}
+	const extension = path.extname(uploadedFile.name).toLowerCase();
+	validateExtension(extension);
+
+	const detected = await fileTypeFromFile(uploadedFile.path);
+	const detectedExtension = detected ? `.${detected.ext}` : '';
+	if (detectedExtension && detectedExtension !== extension) {
+		validateExtension(detectedExtension);
 	}
 }
 

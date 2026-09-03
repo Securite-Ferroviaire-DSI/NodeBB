@@ -177,6 +177,171 @@ describe('Inbox', () => {
 			});
 		});
 
+		describe('attributedTo validation', () => {
+			describe('private messages (non-public)', () => {
+				before(async function () {
+					await privileges.global.give(['groups:chat', 'groups:chat:privileged'], 'fediverse');
+					this.uid = await user.create({ username: utils.generateUUID().slice(0, 10) });
+				});
+
+				it('should not create a message when attributedTo is numeric', async () => {
+					const { note } = helpers.mocks.note({
+						attributedTo: 1,
+						to: [`${nconf.get('url')}/uid/${this.uid}`],
+						cc: [],
+					});
+					const { activity } = helpers.mocks.create({
+						object: note,
+						to: [`${nconf.get('url')}/uid/${this.uid}`],
+						cc: [],
+					});
+
+					const result = await activitypub.inbox.create({ body: activity });
+					assert.strictEqual(result, null);
+					assert.strictEqual(await messaging.messageExists(note.id), false);
+				});
+
+				it('should not create a message when attributedTo is null', async () => {
+					const { note } = helpers.mocks.note({
+						attributedTo: null,
+						to: [`${nconf.get('url')}/uid/${this.uid}`],
+						cc: [],
+					});
+					const { activity } = helpers.mocks.create({
+						object: note,
+						to: [`${nconf.get('url')}/uid/${this.uid}`],
+						cc: [],
+					});
+
+					const result = await activitypub.inbox.create({ body: activity });
+					assert.strictEqual(result, null);
+					assert.strictEqual(await messaging.messageExists(note.id), false);
+				});
+
+				it('should not create a message when attributedTo is boolean', async () => {
+					const { note } = helpers.mocks.note({
+						attributedTo: true,
+						to: [`${nconf.get('url')}/uid/${this.uid}`],
+						cc: [],
+					});
+					const { activity } = helpers.mocks.create({
+						object: note,
+						to: [`${nconf.get('url')}/uid/${this.uid}`],
+						cc: [],
+					});
+
+					const result = await activitypub.inbox.create({ body: activity });
+					assert.strictEqual(result, null);
+					assert.strictEqual(await messaging.messageExists(note.id), false);
+				});
+
+				it('should not create a message when attributedTo is non-URI string', async () => {
+					const { note } = helpers.mocks.note({
+						attributedTo: 'not-a-uri',
+						to: [`${nconf.get('url')}/uid/${this.uid}`],
+						cc: [],
+					});
+					const { activity } = helpers.mocks.create({
+						object: note,
+						to: [`${nconf.get('url')}/uid/${this.uid}`],
+						cc: [],
+					});
+
+					const result = await activitypub.inbox.create({ body: activity });
+					assert.strictEqual(result, null);
+					assert.strictEqual(await messaging.messageExists(note.id), false);
+				});
+
+				it('should not create a message when attributedTo is an array of non-URI values', async () => {
+					const { note } = helpers.mocks.note({
+						attributedTo: [1, 'not-a-uri'],
+						to: [`${nconf.get('url')}/uid/${this.uid}`],
+						cc: [],
+					});
+					const { activity } = helpers.mocks.create({
+						object: note,
+						to: [`${nconf.get('url')}/uid/${this.uid}`],
+						cc: [],
+					});
+
+					const result = await activitypub.inbox.create({ body: activity });
+					assert.strictEqual(result, null);
+					assert.strictEqual(await messaging.messageExists(note.id), false);
+				});
+
+				it('should accept a Create(Note) with valid URI attributedTo', async function () {
+					const { id: actor } = helpers.mocks.person();
+					const { note } = helpers.mocks.note({
+						attributedTo: actor,
+						to: [`${nconf.get('url')}/uid/${this.uid}`],
+						cc: [],
+					});
+					const { activity } = helpers.mocks.create({
+						actor,
+						object: note,
+						to: [`${nconf.get('url')}/uid/${this.uid}`],
+						cc: [],
+					});
+
+					const result = await activitypub.inbox.create({ body: activity });
+					assert.notStrictEqual(result, null);
+					assert.strictEqual(await messaging.messageExists(note.id), true);
+				});
+			});
+
+			describe('public posts', () => {
+				it('should not create a post when attributedTo is numeric', async () => {
+					const { note } = helpers.mocks.note({
+						attributedTo: 42,
+						to: ['https://www.w3.org/ns/activitystreams#Public'],
+						cc: [],
+					});
+					const { activity } = helpers.mocks.create({
+						object: note,
+						to: ['https://www.w3.org/ns/activitystreams#Public'],
+						cc: [],
+					});
+
+					const result = await activitypub.notes.assert(0, note, { skipChecks: true });
+					assert.strictEqual(result, null);
+				});
+
+				it('should not create a post when attributedTo is object with numeric id', async () => {
+					const { note } = helpers.mocks.note({
+						attributedTo: { type: 'Person', id: 99 },
+						to: ['https://www.w3.org/ns/activitystreams#Public'],
+						cc: [],
+					});
+					const { activity } = helpers.mocks.create({
+						object: note,
+						to: ['https://www.w3.org/ns/activitystreams#Public'],
+						cc: [],
+					});
+
+					const result = await activitypub.notes.assert(0, note, { skipChecks: true });
+					assert.strictEqual(result, null);
+				});
+
+				it('should accept a Create(Note) with valid URI attributedTo', async () => {
+					const { id: actor } = helpers.mocks.person();
+					const { note } = helpers.mocks.note({
+						attributedTo: actor,
+						to: ['https://www.w3.org/ns/activitystreams#Public'],
+						cc: [],
+					});
+					const { activity } = helpers.mocks.create({
+						actor,
+						object: note,
+						to: ['https://www.w3.org/ns/activitystreams#Public'],
+						cc: [],
+					});
+
+					const result = await activitypub.notes.assert(0, note, { skipChecks: true });
+					assert.notStrictEqual(result, null);
+				});
+			});
+		});
+
 		describe('Announce', () => {
 			let cid;
 
@@ -370,8 +535,10 @@ describe('Inbox', () => {
 			describe('(Like)', () => {
 				it('should upvote a local post', async () => {
 					const uid = await user.create({ username: utils.generateUUID().slice(0, 10) });
+					const { id: actor, actor: groupActor } = helpers.mocks.group();
+					await activitypub.actors.assertGroup(actor);
 					const { postData } = await topics.post({
-						cid,
+						cid: actor,
 						uid,
 						title: utils.generateUUID(),
 						content: utils.generateUUID(),
@@ -381,6 +548,7 @@ describe('Inbox', () => {
 						object: `${nconf.get('url')}/post/${postData.pid}`,
 					});
 					const { activity } = helpers.mocks.announce({
+						actor,
 						object: like,
 					});
 
@@ -393,12 +561,17 @@ describe('Inbox', () => {
 				});
 
 				it('should upvote an asserted remote post', async () => {
-					const { id } = helpers.mocks.note();
-					await activitypub.notes.assert(0, id, { skipChecks: true });
+					const { id: actor, actor: groupActor } = helpers.mocks.group();
+					await activitypub.actors.assertGroup(actor);
+					const { id, note } = helpers.mocks.note({
+						audience: actor,
+					});
+					const assertion = await activitypub.notes.assert(0, id, { skipChecks: true });
 					const { activity: like } = helpers.mocks.like({
 						object: id,
 					});
 					const { activity } = helpers.mocks.announce({
+						actor,
 						object: like,
 					});
 
@@ -415,11 +588,19 @@ describe('Inbox', () => {
 			describe('(Update)', () => {
 				it('should update a note\'s content', async () => {
 					const { id: actor } = helpers.mocks.person();
-					const { id, note } = helpers.mocks.note({ attributedTo: actor });
+					const { id: groupActor } = helpers.mocks.group();
+					await activitypub.actors.assertGroup(actor);
+					const { id, note } = helpers.mocks.note({
+						attributedTo: actor,
+						audience: groupActor,
+					});
 					await activitypub.notes.assert(0, id, { skipChecks: true });
 					note.content = utils.generateUUID();
 					const { activity: update } = helpers.mocks.update({ object: note });
-					const { activity } = helpers.mocks.announce({ object: update });
+					const { activity } = helpers.mocks.announce({
+						actor: groupActor,
+						object: update,
+					});
 
 					await activitypub.inbox.announce({ body: activity });
 
@@ -560,6 +741,9 @@ describe('Inbox', () => {
 					this.remoteId = remote.id;
 					const result = await activitypub.actors.assert([remote.id]);
 
+					// Grant fediverse group global chat privileges for remote actor message deletion
+					await privileges.global.give(['groups:chat', 'groups:chat:privileged'], 'fediverse');
+
 					// Create a private chat room between the users
 					const { note } = helpers.mocks.note({
 						attributedTo: remote.id,
@@ -583,7 +767,7 @@ describe('Inbox', () => {
 						actor: this.remoteId,
 						object: this.mid,
 					});
-
+					await privileges.global.give(['groups:chat'], 'fediverse');
 					// Process the delete directly
 					await activitypub.inbox.delete({ body: deleteActivity });
 
@@ -958,6 +1142,111 @@ describe('Inbox', () => {
 			it('should have a positive counter for the cid', async () => {
 				const score = await db.sortedSetScore(`uid:${remoteActor}:cids`, String(cid));
 				assert(score > 0);
+			});
+		});
+		describe('Relay', () => {
+			const relayActor = 'https://relay.example.com/actor';
+
+			it('should add a follower when the instance actor is followed', async () => {
+				const { activity } = helpers.mocks.follow({
+					actor: relayActor,
+					object: { id: `${nconf.get('url')}/actor` },
+				});
+
+				await activitypub.inbox.follow({ body: activity });
+
+				const score = await db.sortedSetScore('relays:state', relayActor);
+				assert.strictEqual(score, -1);
+			});
+
+			it('should remove a follower when a Follow activity is undone', async () => {
+				await db.sortedSetAdd('relays:state', -1, relayActor);
+				await db.sortedSetAdd('relays:createtime', Date.now(), relayActor);
+
+				const followActivity = {
+					id: `${nconf.get('url')}/actor#activity/follow/${relayActor}`,
+					type: 'Follow',
+					actor: relayActor,
+					object: `${nconf.get('url')}/actor`,
+				};
+				const { activity: undoActivity } = helpers.mocks.undo({
+					actor: relayActor,
+					object: followActivity,
+				});
+
+				await activitypub.inbox.undo({ body: undoActivity });
+
+				const score = await db.sortedSetScore('relays:state', relayActor);
+				assert.strictEqual(score, null);
+			});
+
+			it('should broadcast a public activity received via announce to relay followers', async () => {
+				await db.sortedSetAdd('relays:state', -1, relayActor);
+				await db.sortedSetAdd('relays:createtime', Date.now(), relayActor);
+
+				const { note, id } = helpers.mocks.note();
+				const { activity: createActivity } = helpers.mocks.create(note);
+				const { activity: announceActivity } = helpers.mocks.announce({
+					actor: relayActor,
+					object: createActivity,
+				});
+
+				// Mock activitypub.send to verify broadcast
+				const originalSend = activitypub.send;
+				const sentTo = [];
+				activitypub.send = async (type, id, targets, payload) => {
+					sentTo.push({ targets, payload });
+					return true;
+				};
+
+				// Mock resolveId so remote note IDs resolve to a local pid
+				const originalResolveId = activitypub.resolveId;
+				activitypub.resolveId = async () => 1;
+
+				// Mock notes.assert to return a valid assertion
+				const originalNotesAssert = activitypub.notes.assert;
+				activitypub.notes.assert = async () => ({ tid: 1 });
+
+				// Mock Notes.announce.add to avoid post/topic lookup errors
+				const originalAnnounceAdd = activitypub.notes.announce.add;
+				activitypub.notes.announce.add = async () => {};
+
+				// Mock posts.getPostField so Feps.announce can resolve tid/cid
+				const originalGetPostField = posts.getPostField;
+				posts.getPostField = async (id, field) => {
+					if (field === 'tid') return 1;
+					if (field === 'cid') return 1;
+					return originalGetPostField(id, field);
+				};
+
+				// Mock topics.getTopicField so Feps.announce can resolve cid
+				const originalGetTopicField = topics.getTopicField;
+				topics.getTopicField = async (id, field) => {
+					if (field === 'cid') return 1;
+					return originalGetTopicField(id, field);
+				};
+
+				// Mock relays.list so Feps.announce has relay targets
+				const originalRelaysList = activitypub.relays.list;
+				activitypub.relays.list = async () => [{ state: 2, url: relayActor }];
+
+				await activitypub.inbox.announce({ body: announceActivity });
+
+				// We expect a broadcast to relay followers
+				// Feps.announce will call activitypub.send
+				assert(sentTo.length > 0);
+				const broadcast = sentTo.find(s => s.targets.includes(relayActor));
+				assert(broadcast, 'Should have broadcast to relay follower');
+
+				activitypub.send = originalSend;
+				activitypub.resolveId = originalResolveId;
+				activitypub.notes.assert = originalNotesAssert;
+				activitypub.notes.announce.add = originalAnnounceAdd;
+				posts.getPostField = originalGetPostField;
+				topics.getTopicField = originalGetTopicField;
+				activitypub.relays.list = originalRelaysList;
+				await db.sortedSetRemove('relays:state', relayActor);
+				await db.sortedSetRemove('relays:createtime', relayActor);
 			});
 		});
 	});

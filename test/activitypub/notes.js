@@ -422,4 +422,603 @@ describe('Notes', () => {
 			assert(!inboxed);
 		});
 	});
+
+	describe('Blocklist severity 3 (filter)', () => {
+		/**
+		 * Clear the post queue between tests.
+		 */
+		async function clearQueue() {
+			const queuedIds = await db.getSortedSetMembers('post:queue');
+			await Promise.all(queuedIds.map(async (id) => {
+				await db.delete(`post:queue:${id}`);
+			}));
+			await db.delete('post:queue');
+		}
+
+		/**
+		 * Mock instances.isAllowed to return a specific severity for a domain.
+		 */
+		function mockBlockedDomain(domain, severity) {
+			activitypub.instances.isAllowed = async (hostname) => {
+				if (hostname === domain) {
+					return {
+						allowed: severity > 2,
+						severity,
+						listUrl: 'https://example.org/blocklist.csv',
+					};
+				}
+				return activitypub.instances._originalIsAllowed(hostname);
+			};
+		}
+
+		before(async () => {
+			activitypub.instances._originalIsAllowed = activitypub.instances.isAllowed;
+			meta.config.postQueue = 1;
+		});
+
+		after(async () => {
+			delete meta.config.postQueue;
+			if (activitypub.instances._originalIsAllowed) {
+				activitypub.instances.isAllowed = activitypub.instances._originalIsAllowed;
+			}
+		});
+
+		beforeEach(async () => {
+			await clearQueue();
+		});
+
+		describe('!hasTid — new topic', () => {
+			beforeEach(function () {
+				mockBlockedDomain('blocked.example.org', 3);
+				this._baseUrl = helpers.mocks._baseUrl;
+				helpers.mocks._baseUrl = 'https://blocked.example.org';
+			});
+
+			afterEach(function () {
+				helpers.mocks._baseUrl = this._baseUrl;
+			});
+
+			it('should queue the main post instead of creating it', async () => {
+				const { id: noteId } = helpers.mocks.note();
+				const assertion = await activitypub.notes.assert(0, noteId, {
+					skipChecks: true,
+				});
+
+				assert(assertion);
+				assert.strictEqual(assertion.tid, null);
+				assert.strictEqual(assertion.queued, 1);
+				assert.strictEqual(assertion.count, undefined);
+
+				const queueCount = await db.sortedSetCard('post:queue');
+				assert.strictEqual(queueCount, 1);
+			});
+
+			it('should queue parent and drop replies when hasTid is false', async () => {
+				const { id: parentId } = helpers.mocks.note();
+				const { id: replyId } = helpers.mocks.note({
+					inReplyTo: parentId,
+				});
+
+				// Assert the parent with severity 3 — should queue and return tid: null
+				const parentAssertion = await activitypub.notes.assert(0, parentId, {
+					skipChecks: true,
+				});
+
+				assert(parentAssertion);
+				assert.strictEqual(parentAssertion.tid, null);
+				assert.strictEqual(parentAssertion.queued, 1);
+
+				// Assert the reply with severity 3 — parent has no tid, so hasTid is false
+				const replyAssertion = await activitypub.notes.assert(0, replyId, {
+					skipChecks: true,
+				});
+
+				assert(replyAssertion);
+				assert.strictEqual(replyAssertion.tid, null);
+				assert.strictEqual(replyAssertion.queued, 1);
+
+				// Verify neither post was created as a real topic/reply
+				assert.strictEqual(await posts.exists(parentId), false);
+				assert.strictEqual(await posts.exists(replyId), false);
+
+				const queueCount = await db.sortedSetCard('post:queue');
+				assert.strictEqual(queueCount, 1);
+			});
+		});
+
+		describe('hasTid — existing topic', () => {
+			let tid;
+			let mainPid;
+			let cid;
+
+			before(async () => {
+				const uid = await user.create({ username: utils.generateUUID().slice(0, 10) });
+				({ cid } = await categories.create({ name: utils.generateUUID() }));
+				const { topicData, postData } = await topics.post({
+					cid,
+					uid,
+					title: utils.generateUUID(),
+					content: utils.generateUUID(),
+				});
+				tid = topicData.tid;
+				mainPid = postData.pid;
+			});
+
+			beforeEach(function () {
+				mockBlockedDomain('blocked.example.org', 3);
+				this._baseUrl = helpers.mocks._baseUrl;
+				helpers.mocks._baseUrl = 'https://blocked.example.org';
+			});
+
+			afterEach(function () {
+				helpers.mocks._baseUrl = this._baseUrl;
+			});
+
+			it('should queue replies when severity is 3', async () => {
+				const { id: replyId } = helpers.mocks.note({
+					inReplyTo: mainPid,
+				});
+				const assertion = await activitypub.notes.assert(0, replyId, {
+					skipChecks: true,
+				});
+
+				assert(assertion);
+				assert.strictEqual(assertion.tid, tid);
+				assert.strictEqual(assertion.queued, 1);
+
+				const queueCount = await db.sortedSetCard('post:queue');
+				assert.strictEqual(queueCount, 1);
+			});
+
+			it('should queue multiple replies', async () => {
+				const { id: id1 } = helpers.mocks.note({
+					inReplyTo: mainPid,
+				});
+				const { id: id2 } = helpers.mocks.note({
+					inReplyTo: mainPid,
+				});
+
+				const assertion1 = await activitypub.notes.assert(0, id1, {
+					skipChecks: true,
+				});
+				const assertion2 = await activitypub.notes.assert(0, id2, {
+					skipChecks: true,
+				});
+
+				assert(assertion1);
+				assert(assertion2);
+				assert.strictEqual(assertion1.tid, tid);
+				assert.strictEqual(assertion1.queued, 1);
+				assert.strictEqual(assertion2.tid, tid);
+				assert.strictEqual(assertion2.queued, 1);
+
+				const queueCount = await db.sortedSetCard('post:queue');
+				assert.strictEqual(queueCount, 2);
+			});
+		});
+
+		describe('null case', () => {
+			beforeEach(function () {
+				this._baseUrl = helpers.mocks._baseUrl;
+				helpers.mocks._baseUrl = 'https://allowed.example.org';
+			});
+
+			afterEach(function () {
+				helpers.mocks._baseUrl = this._baseUrl;
+			});
+
+			it('should NOT queue posts when domain is not blocked', async () => {
+				const { id: noteId } = helpers.mocks.note();
+				const assertion = await activitypub.notes.assert(0, noteId, {
+					skipChecks: true,
+				});
+
+				assert(assertion);
+				assert(assertion.tid);
+				assert.strictEqual(assertion.queued, 0);
+
+				const queueCount = await db.sortedSetCard('post:queue');
+				assert.strictEqual(queueCount, 0);
+			});
+		});
+
+		describe('Severity 1 and 2', () => {
+			beforeEach(function () {
+				this._baseUrl = helpers.mocks._baseUrl;
+				helpers.mocks._baseUrl = 'https://blocked.example.org';
+			});
+
+			afterEach(function () {
+				helpers.mocks._baseUrl = this._baseUrl;
+			});
+
+			it('should NOT queue posts with severity 1 (suspend)', async () => {
+				mockBlockedDomain('blocked.example.org', 1);
+				const { id: noteId } = helpers.mocks.note();
+				const assertion = await activitypub.notes.assert(0, noteId, {
+					skipChecks: true,
+				});
+
+				assert(!assertion);
+
+				const queueCount = await db.sortedSetCard('post:queue');
+				assert.strictEqual(queueCount, 0);
+			});
+
+			it('should NOT queue posts with severity 2 (silence)', async () => {
+				mockBlockedDomain('blocked.example.org', 2);
+				const { id: noteId } = helpers.mocks.note();
+				const assertion = await activitypub.notes.assert(0, noteId, {
+					skipChecks: true,
+				});
+
+				assert(!assertion);
+
+				const queueCount = await db.sortedSetCard('post:queue');
+				assert.strictEqual(queueCount, 0);
+			});
+		});
+	});
+
+	describe('getParentChain', () => {
+		it('should retrieve a two-note chain via inReplyTo', async () => {
+			const { id: parentId } = helpers.mocks.note();
+			const { id: childId } = helpers.mocks.note({ inReplyTo: parentId });
+
+			const chain = await activitypub.notes.getParentChain(0, childId);
+
+			assert(chain instanceof Set);
+			assert.strictEqual(chain.size, 2);
+
+			const pids = Array.from(chain).map((n) => n.pid);
+			assert(pids.includes(parentId));
+			assert(pids.includes(childId));
+		});
+
+		it('should stop at configured depth', async () => {
+			meta.config.activitypubParentTraversalDepth = 30;
+
+			const noteIds = [];
+			let previousId = null;
+			for (let i = 0; i < 55; i += 1) {
+				const noteData = previousId ? { inReplyTo: previousId } : {};
+				const { id } = helpers.mocks.note(noteData);
+				noteIds.push(id);
+				previousId = id;
+			}
+
+			const chain = await activitypub.notes.getParentChain(0, noteIds[noteIds.length - 1]);
+
+			assert(chain instanceof Set);
+			assert(chain.size <= 30);
+
+			delete meta.config.activitypubParentTraversalDepth;
+		});
+
+		it('should use default depth of 50 when not configured', async () => {
+			delete meta.config.activitypubParentTraversalDepth;
+
+			const noteIds = [];
+			let previousId = null;
+			for (let i = 0; i < 55; i += 1) {
+				const noteData = previousId ? { inReplyTo: previousId } : {};
+				const { id } = helpers.mocks.note(noteData);
+				noteIds.push(id);
+				previousId = id;
+			}
+
+			const chain = await activitypub.notes.getParentChain(0, noteIds[noteIds.length - 1]);
+
+			assert(chain instanceof Set);
+			assert(chain.size <= 50);
+		});
+	});
+
+	describe('Announce from remote category after initial assertion', () => {
+		let remoteCid;
+		let noteId;
+		let note;
+
+		before(async () => {
+			// Create a remote group actor on a different origin than the note
+			({ id: remoteCid } = helpers.mocks.group({
+				id: `https://other.example.org/group/${utils.generateUUID()}`,
+			}));
+			await activitypub.actors.assertGroup([remoteCid]);
+		});
+
+		it('should move topic to announce-er category (currently ignores announce cid)', async () => {
+			// Step 1: Assert a note addressed to the remote category in cc
+			// Origin mismatch → topic should end up in cid -1
+			note = helpers.mocks.note({
+				cc: [remoteCid],
+			});
+			noteId = note.id;
+
+			const assertion = await activitypub.notes.assert(0, noteId, { skipChecks: true });
+			assert(assertion);
+			assert(assertion.tid);
+
+			// Verify topic is in cid -1 (uncategorized)
+			const topicData = await topics.getTopicData(assertion.tid);
+			assert.strictEqual(topicData.cid, -1);
+
+			// Step 2: Announce from the same remote category
+			// Build an Announce(Create(Note)) that inbox.announce will process
+			const createActivity = helpers.mocks.create(note.note);
+			const { activity: announceActivity } = helpers.mocks.announce({
+				actor: remoteCid,
+				object: createActivity.activity,
+			});
+
+			await activitypub.inbox.announce({ body: announceActivity });
+
+			// Step 3: Verify the topic was moved to the remote category
+			const updatedTopic = await topics.getTopicData(assertion.tid);
+			assert.strictEqual(
+				parseInt(updatedTopic.cid, 10),
+				parseInt(remoteCid, 10),
+				'Topic should be moved to the announce-er category',
+			);
+		});
+	});
+
+	describe('auto-categorization with queue rule', () => {
+		let remoteCid;
+		let targetCid;
+		let rid;
+		const tagName = utils.generateUUID().slice(0, 8);
+
+		before(async () => {
+			// Create a remote group actor
+			({ id: remoteCid } = helpers.mocks.group());
+			// Create a local target category
+			({ cid: targetCid } = await categories.create({ name: utils.generateUUID().slice(0, 8) }));
+			// Add a hashtag-type auto-categorization rule with filter (queue) enabled
+			rid = await activitypub.rules.upsert('hashtag', tagName, targetCid, 1);
+			meta.config.postQueue = 1;
+		});
+
+		after(async () => {
+			delete meta.config.postQueue;
+			if (rid) {
+				await activitypub.rules.delete(rid);
+			}
+		});
+
+		beforeEach(async () => {
+			// Clear the queue
+			const queuedIds = await db.getSortedSetMembers('post:queue');
+			await Promise.all(queuedIds.map(async (id) => {
+				await db.delete(`post:queue:${id}`);
+			}));
+			await db.delete('post:queue');
+		});
+
+		it('should queue as crosspost when auto-categorization rule matches with filter=true', async () => {
+			const { id: noteId } = helpers.mocks.note({
+				audience: [remoteCid],
+				tag: [
+					{ type: 'Hashtag', name: `#${tagName}` },
+				],
+			});
+			const assertion = await activitypub.notes.assert(0, noteId, {
+				skipChecks: true,
+			});
+
+			assert(assertion);
+			assert.strictEqual(assertion.queued, 0); // topic in remote category parsed normally
+			assert(assertion.tid);
+
+			// Verify queue entry has crosspostCid
+			const queueIds = await db.getSortedSetMembers('post:queue');
+			assert.strictEqual(queueIds.length, 1);
+
+			const queueData = await db.getObject(`post:queue:${queueIds[0]}`);
+			assert.strictEqual(queueData.type, 'crosspost');
+			const parsedData = typeof queueData.data === 'string' ? JSON.parse(queueData.data) : queueData.data;
+			assert.strictEqual(parseInt(parsedData.crosspostCid, 10), targetCid);
+			assert.strictEqual(parsedData.tid, assertion.tid);
+		});
+	});
+
+	describe('auto-categorization age cutoff', () => {
+		let remoteCid;
+		let targetCid;
+		let rid;
+		const tagName = utils.generateUUID().slice(0, 8);
+
+		before(async () => {
+			// Create a remote group actor
+			({ id: remoteCid } = helpers.mocks.group());
+			// Create a local target category
+			({ cid: targetCid } = await categories.create({ name: utils.generateUUID().slice(0, 8) }));
+			// Add a hashtag-type auto-categorization rule with filter (queue=true)
+			rid = await activitypub.rules.upsert('hashtag', tagName, targetCid, 1);
+			meta.config.postQueue = 1;
+		});
+
+		after(async () => {
+			delete meta.config.postQueue;
+			delete meta.config.activitypubRulesCutoffDays;
+			if (rid) {
+				await activitypub.rules.delete(rid);
+			}
+		});
+
+		beforeEach(async () => {
+			// Clear the queue
+			const queuedIds = await db.getSortedSetMembers('post:queue');
+			await Promise.all(queuedIds.map(async (id) => {
+				await db.delete(`post:queue:${id}`);
+			}));
+			await db.delete('post:queue');
+		});
+
+		describe('cutoff disabled (0)', () => {
+			beforeEach(() => {
+				meta.config.activitypubRulesCutoffDays = 0;
+			});
+
+			afterEach(() => {
+				delete meta.config.activitypubRulesCutoffDays;
+			});
+
+			it('should queue crosspost for old posts when cutoff is 0', async () => {
+				// Create a very old post (365 days ago)
+				const publishedDate = new Date(Date.now() - (365 * 24 * 60 * 60 * 1000)).toISOString();
+				const { id: noteId } = helpers.mocks.note({
+					audience: [remoteCid],
+					published: publishedDate,
+					tag: [
+						{ type: 'Hashtag', name: `#${tagName}` },
+					],
+				});
+				const assertion = await activitypub.notes.assert(0, noteId, {
+					skipChecks: true,
+				});
+
+				assert(assertion);
+				assert(assertion.tid, 'Topic should be created');
+				assert.strictEqual(assertion.queued, 0, 'Topic should not be queued');
+
+				// Verify crosspost was queued despite post age
+				const queueIds = await db.getSortedSetMembers('post:queue');
+				assert.strictEqual(queueIds.length, 1, 'Crosspost should be queued');
+
+				const queueData = await db.getObject(`post:queue:${queueIds[0]}`);
+				assert.strictEqual(queueData.type, 'crosspost');
+				const parsedData = typeof queueData.data === 'string' ? JSON.parse(queueData.data) : queueData.data;
+				assert.strictEqual(parseInt(parsedData.crosspostCid, 10), targetCid);
+			});
+		});
+
+		describe('cutoff enabled', () => {
+			const cutoffDays = 30;
+
+			beforeEach(() => {
+				meta.config.activitypubRulesCutoffDays = cutoffDays;
+			});
+
+			afterEach(() => {
+				delete meta.config.activitypubRulesCutoffDays;
+			});
+
+			it('should queue crosspost for recent posts when within cutoff', async () => {
+				// Create a recent post (1 day old)
+				const publishedDate = new Date(Date.now() - (1 * 24 * 60 * 60 * 1000)).toISOString();
+				const { id: noteId } = helpers.mocks.note({
+					audience: [remoteCid],
+					published: publishedDate,
+					tag: [
+						{ type: 'Hashtag', name: `#${tagName}` },
+					],
+				});
+				const assertion = await activitypub.notes.assert(0, noteId, {
+					skipChecks: true,
+				});
+
+				assert(assertion);
+				assert(assertion.tid, 'Topic should be created');
+				assert.strictEqual(assertion.queued, 0, 'Topic should not be queued');
+
+				// Verify crosspost was queued
+				const queueIds = await db.getSortedSetMembers('post:queue');
+				assert.strictEqual(queueIds.length, 1, 'Crosspost should be queued');
+
+				const queueData = await db.getObject(`post:queue:${queueIds[0]}`);
+				assert.strictEqual(queueData.type, 'crosspost');
+				const parsedData = typeof queueData.data === 'string' ? JSON.parse(queueData.data) : queueData.data;
+				assert.strictEqual(parseInt(parsedData.crosspostCid, 10), targetCid);
+			});
+
+			it('should queue crosspost for posts at the cutoff boundary', async () => {
+				// Create a post just under the cutoff (29 days old, leaving room for test timing)
+				const publishedDate = new Date(Date.now() - ((cutoffDays - 1) * 24 * 60 * 60 * 1000)).toISOString();
+				const { id: noteId } = helpers.mocks.note({
+					audience: [remoteCid],
+					published: publishedDate,
+					tag: [
+						{ type: 'Hashtag', name: `#${tagName}` },
+					],
+				});
+				const assertion = await activitypub.notes.assert(0, noteId, {
+					skipChecks: true,
+				});
+
+				assert(assertion);
+				assert(assertion.tid, 'Topic should be created');
+
+				// Verify crosspost was queued
+				const queueIds = await db.getSortedSetMembers('post:queue');
+				assert.strictEqual(queueIds.length, 1, 'Crosspost should be queued');
+			});
+
+			it('should NOT queue crosspost for posts older than cutoff', async () => {
+				// Create a post older than cutoff (31 days old)
+				const publishedDate = new Date(Date.now() - ((cutoffDays + 1) * 24 * 60 * 60 * 1000)).toISOString();
+				const { id: noteId } = helpers.mocks.note({
+					audience: [remoteCid],
+					published: publishedDate,
+					tag: [
+						{ type: 'Hashtag', name: `#${tagName}` },
+					],
+				});
+				const assertion = await activitypub.notes.assert(0, noteId, {
+					skipChecks: true,
+				});
+
+				assert(assertion);
+				assert(assertion.tid, 'Topic should still be created');
+				assert.strictEqual(assertion.queued, 0, 'Topic should not be queued');
+
+				// Verify no crosspost was queued
+				const queueIds = await db.getSortedSetMembers('post:queue');
+				assert.strictEqual(queueIds.length, 0, 'No crosspost should be queued');
+			});
+
+			it('should NOT queue crosspost for very old posts (60 days)', async () => {
+				// Create a post older than cutoff (60 days old)
+				const publishedDate = new Date(Date.now() - (60 * 24 * 60 * 60 * 1000)).toISOString();
+				const { id: noteId } = helpers.mocks.note({
+					audience: [remoteCid],
+					published: publishedDate,
+					tag: [
+						{ type: 'Hashtag', name: `#${tagName}` },
+					],
+				});
+				const assertion = await activitypub.notes.assert(0, noteId, {
+					skipChecks: true,
+				});
+
+				assert(assertion);
+
+				// Verify no crosspost was queued
+				const queueIds = await db.getSortedSetMembers('post:queue');
+				assert.strictEqual(queueIds.length, 0, 'No crosspost should be queued');
+			});
+
+			it('should NOT queue crosspost for very old posts (1 year)', async () => {
+				// Create a very old post (365 days old)
+				const publishedDate = new Date(Date.now() - (365 * 24 * 60 * 60 * 1000)).toISOString();
+				const { id: noteId } = helpers.mocks.note({
+					audience: [remoteCid],
+					published: publishedDate,
+					tag: [
+						{ type: 'Hashtag', name: `#${tagName}` },
+					],
+				});
+				const assertion = await activitypub.notes.assert(0, noteId, {
+					skipChecks: true,
+				});
+
+				assert(assertion);
+				assert(assertion.tid, 'Topic should still be created');
+
+				// Verify no crosspost was queued
+				const queueIds = await db.getSortedSetMembers('post:queue');
+				assert.strictEqual(queueIds.length, 0, 'No crosspost should be queued');
+			});
+		});
+	});
 });

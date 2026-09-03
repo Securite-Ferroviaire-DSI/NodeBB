@@ -51,7 +51,7 @@ modsController.flags.list = async function (req, res) {
 		res.locals.cids = moderatedCids.map(cid => String(cid));
 	}
 
-	const validFilters = helpers.validateParameters(req.query, Object.keys(allFilters), validation);
+	const validFilters = helpers.validateParameters(req.query, allFilters, validation);
 
 	let hasFilter = !!Object.keys(validFilters).length;
 
@@ -174,8 +174,12 @@ modsController.flags.detail = async function (req, res, next) {
 		return await user.hidePrivateData(userData.filter(u => u && u.userslug), uid);
 	}
 
-	const assignees = await getAssignees(results.flagData, req.uid);
-	results.flagData.history = await flags.getHistory(req.params.flagId);
+	const [assignees, history] = await Promise.all([
+		getAssignees(results.flagData, req.uid),
+		flags.getHistory(req.params.flagId),
+		flags.markNotificationsRead(req.params.flagId, req.uid),
+	]);
+	results.flagData.history = history;
 
 	if (results.flagData.type === 'user') {
 		results.flagData.type_path = 'uid';
@@ -225,6 +229,10 @@ modsController.postQueue = async function (req, res, next) {
 		Promise.all(['global', 'admin'].map(async type => privileges[type].get(req.uid))),
 	]);
 	_privileges = { ..._privileges[0], ..._privileges[1] };
+	let customReasons = [];
+	if (isAdmin || isGlobalMod || moderatedCids.length) {
+		customReasons = await user.bans.getCustomReasons({ type: 'post-queue' });
+	}
 
 	postData = postData
 		.filter(p => p &&
@@ -248,7 +256,7 @@ modsController.postQueue = async function (req, res, next) {
 	postData = postData.slice(start, stop + 1);
 	const crumbs = [{ text: '[[pages:post-queue]]', url: id ? '/post-queue' : undefined }];
 	if (id && postData.length) {
-		const text = postData[0].data.tid ? '[[post-queue:reply]]' : '[[post-queue:topic]]';
+		const text = postData[0].data.tid ? '[[post-queue:reply]]' : (postData[0].data.crosspostCid ? '[[post-queue:crosspost]]' : '[[post-queue:topic]]');
 		crumbs.push({ text: text });
 	}
 	res.render('post-queue', {
@@ -263,5 +271,6 @@ modsController.postQueue = async function (req, res, next) {
 		enabled: meta.config.postQueue,
 		singlePost: !!id,
 		privileges: _privileges,
+		customReasons,
 	});
 };

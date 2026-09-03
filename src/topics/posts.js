@@ -2,7 +2,6 @@
 'use strict';
 
 const _ = require('lodash');
-const validator = require('validator');
 const nconf = require('nconf');
 
 const db = require('../database');
@@ -146,7 +145,7 @@ module.exports = function (Topics) {
 
 				// Username override for guests, if enabled
 				if (meta.config.allowGuestHandles && postObj.uid === 0 && postObj.handle) {
-					postObj.user.username = validator.escape(String(postObj.handle));
+					postObj.user.username = String(postObj.handle);
 					postObj.user.displayname = postObj.user.username;
 				}
 			}
@@ -172,7 +171,6 @@ module.exports = function (Topics) {
 					(post.selfPost && !topicData.locked && !post.deleted) ||
 					(post.selfPost && post.deleted && parseInt(post.deleterUid, 10) === parseInt(topicPrivileges.uid, 10)) ||
 					((loggedIn || topicData.postSharing.length) && !post.deleted);
-				post.ip = topicPrivileges.isAdminOrMod ? post.ip : undefined;
 
 				posts.modifyPostByPrivilege(post, topicPrivileges);
 			}
@@ -192,7 +190,7 @@ module.exports = function (Topics) {
 		const pidToPrivs = _.zipObject(parentPids, postPrivileges);
 
 		parentPids = parentPids.filter(p => pidToPrivs[p]['topics:read']);
-		const parentPosts = await posts.getPostsFields(parentPids, ['uid', 'pid', 'timestamp', 'content', 'sourceContent', 'deleted']);
+		const parentPosts = await posts.getPostsFields(parentPids, ['uid', 'pid', 'timestamp', 'content', 'sourceContent', 'deleted', 'uploads']);
 		const parentUids = _.uniq(parentPosts.map(postObj => postObj && postObj.uid));
 		const userData = await user.getUsersFields(parentUids, ['username', 'userslug', 'picture']);
 
@@ -201,7 +199,7 @@ module.exports = function (Topics) {
 		await Promise.all(parentPosts.map(async (parentPost) => {
 			const postPrivs = pidToPrivs[parentPost.pid];
 			if (parentPost.deleted && String(parentPost.uid) !== String(callerUid, 10) && !postPrivs['posts:view_deleted']) {
-				parentPost.content = `<p>[[topic:post-is-deleted]]</p>`;
+				posts.clearDeletedPostContent(parentPost);
 				return;
 			}
 			const foundPost = postData.find(p => String(p.pid) === String(parentPost.pid));

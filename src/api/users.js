@@ -16,7 +16,7 @@ const privileges = require('../privileges');
 const notifications = require('../notifications');
 const plugins = require('../plugins');
 const events = require('../events');
-const translator = require('../translator');
+const tx = require('../translator');
 const sockets = require('../socket.io');
 const utils = require('../utils');
 
@@ -86,14 +86,14 @@ usersAPI.update = async function (caller, data) {
 
 	await user.updateProfile(caller.uid, data);
 	const userData = await user.getUserData(data.uid);
-	const oldUsernameEscaped = validator.escape(String(oldUserData.username));
-	if (userData.username !== oldUsernameEscaped) {
+
+	if (userData.username !== oldUserData.username) {
 		await events.log({
 			type: 'username-change',
 			uid: caller.uid,
 			targetUid: data.uid,
 			ip: caller.ip,
-			oldUsername: oldUsernameEscaped,
+			oldUsername: oldUserData.username,
 			newUsername: userData.username,
 		});
 	}
@@ -137,6 +137,8 @@ usersAPI.updateSettings = async function (caller, data) {
 		topicsPerPage: defaults.topicsPerPage,
 		userLang: defaults.userLang,
 		acpLang: defaults.acpLang,
+		chatAllowList: '[]',
+		chatDenyList: '[]',
 	};
 	// load raw settings without parsing values to booleans
 	const current = await db.getObject(`user:${data.uid}:settings`);
@@ -205,12 +207,12 @@ usersAPI.ban = async function (caller, data) {
 	await db.setObjectField(`uid:${data.uid}:ban:${banData.timestamp}`, 'fromUid', caller.uid);
 
 	if (!data.reason) {
-		data.reason = await translator.translate('[[user:info.banned-no-reason]]');
+		data.reason = await tx.translateKey('[[user:info.banned-no-reason]]');
 	}
 
 	sockets.in(`uid_${data.uid}`).emit('event:banned', {
 		until: data.until,
-		reason: validator.escape(String(data.reason || '')),
+		reason: data.reason || '',
 	});
 
 	await flags.resolveFlag('user', data.uid, caller.uid);
@@ -346,6 +348,13 @@ usersAPI.generateToken = async (caller, { uid, description }) => {
 	}
 
 	const tokenObj = await api.utils.tokens.generate({ uid, description });
+	await events.log({
+		type: 'token-add',
+		uid: caller.uid,
+		ip: caller.ip,
+		_tokenUid: uid,
+		description,
+	});
 	return tokenObj.token;
 };
 
@@ -357,6 +366,11 @@ usersAPI.deleteToken = async (caller, { uid, token }) => {
 	}
 
 	await api.utils.tokens.delete(token);
+	await events.log({
+		type: 'token-delete',
+		uid: caller.uid,
+		ip: caller.ip,
+	});
 	return true;
 };
 
@@ -440,8 +454,8 @@ usersAPI.getInviteGroups = async (caller, { uid }) => {
 
 usersAPI.addEmail = async (caller, { email, skipConfirmation, uid }) => {
 	const isSelf = parseInt(caller.uid, 10) === parseInt(uid, 10);
-	const canEdit = await privileges.users.canEdit(caller.uid, uid);
-	if (skipConfirmation && canEdit && !isSelf) {
+	const canManage = await privileges.admin.can('admin:users', caller.uid);
+	if (skipConfirmation && canManage && !isSelf) {
 		if (!email.length) {
 			await user.email.remove(uid);
 		} else {
@@ -460,7 +474,7 @@ usersAPI.addEmail = async (caller, { email, skipConfirmation, uid }) => {
 
 usersAPI.listEmails = async (caller, { uid }) => {
 	const [isPrivileged, { showemail }] = await Promise.all([
-		user.isPrivileged(caller.uid),
+		user.isAdminOrGlobalMod(caller.uid),
 		user.getSettings(uid),
 	]);
 	const isSelf = caller.uid === parseInt(uid, 10);
@@ -473,12 +487,13 @@ usersAPI.listEmails = async (caller, { uid }) => {
 };
 
 usersAPI.getEmail = async (caller, { uid, email }) => {
-	const [isPrivileged, { showemail }, exists] = await Promise.all([
-		user.isPrivileged(caller.uid),
+	const [isPrivileged, { showemail }, ownerUid] = await Promise.all([
+		user.isAdminOrGlobalMod(caller.uid),
 		user.getSettings(uid),
-		db.isSortedSetMember('email:uid', email.toLowerCase()),
+		db.sortedSetScore('email:uid', String(email).toLowerCase()),
 	]);
 	const isSelf = caller.uid === parseInt(uid, 10);
+	const exists = parseInt(ownerUid, 10) === parseInt(uid, 10);
 
 	return exists && (isSelf || isPrivileged || showemail);
 };
@@ -597,14 +612,15 @@ usersAPI.search = async function (caller, data) {
 	}
 	const [allowed, isPrivileged] = await Promise.all([
 		privileges.global.can('search:users', caller.uid),
-		user.isPrivileged(caller.uid),
+		user.isAdminOrGlobalMod(caller.uid),
 	]);
 	let filters = data.filters || [];
 	filters = Array.isArray(filters) ? filters : [filters];
+	const searchBy = String(data.searchBy || 'username').toLowerCase();
 	if (!allowed ||
 		((
-			data.searchBy === 'ip' ||
-			data.searchBy === 'email' ||
+			searchBy === 'ip' ||
+			searchBy === 'email' ||
 			filters.includes('banned') ||
 			filters.includes('muted') ||
 			filters.includes('flagged')
@@ -615,7 +631,7 @@ usersAPI.search = async function (caller, data) {
 	return await user.search({
 		uid: caller.uid,
 		query: data.query,
-		searchBy: data.searchBy || 'username',
+		searchBy: searchBy,
 		page: data.page || 1,
 		sortBy: data.sortBy || 'lastonline',
 		filters: filters,
@@ -694,9 +710,17 @@ const prepareExport = async ({ uid, type }) => {
 	}
 };
 
-usersAPI.checkExportByType = async (caller, { uid, type }) => await prepareExport({ uid, type });
+usersAPI.checkExportByType = async (caller, { uid, type }) => {
+	if (!await privileges.users.canExportData(caller.uid, uid)) {
+		throw new Error('[[error:no-privileges]]');
+	}
+	return await prepareExport({ uid, type });
+};
 
 usersAPI.getExportByType = async (caller, { uid, type }) => {
+	if (!await privileges.users.canExportData(caller.uid, uid)) {
+		throw new Error('[[error:no-privileges]]');
+	}
 	const [extension, mime] = exportMetadata.get(type);
 	const filename = `${uid}_${type}.${extension}`;
 
@@ -709,6 +733,9 @@ usersAPI.getExportByType = async (caller, { uid, type }) => {
 };
 
 usersAPI.generateExport = async (caller, { uid, type }) => {
+	if (!await privileges.users.canExportData(caller.uid, uid)) {
+		throw new Error('[[error:no-privileges]]');
+	}
 	const validTypes = ['profile', 'posts', 'uploads'];
 	if (!validTypes.includes(type)) {
 		throw new Error('[[error:invalid-data]]');
@@ -731,9 +758,9 @@ usersAPI.generateExport = async (caller, { uid, type }) => {
 	});
 	child.on('exit', async () => {
 		await db.deleteObjectField('locks', `export:${uid}${type}`);
-		const { displayname } = await user.getUserFields(uid, ['username']);
+		const displayname = await user.getNotificationDisplayname(uid);
 		const n = await notifications.create({
-			bodyShort: `[[notifications:${type}-exported, ${displayname}]]`,
+			bodyShort: tx.compile(`notifications:${type}-exported`, displayname),
 			path: `/api/v3/users/${uid}/exports/${type}`,
 			nid: `${type}:export:${uid}`,
 			from: uid,

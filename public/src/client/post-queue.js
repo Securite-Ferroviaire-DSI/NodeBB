@@ -3,11 +3,12 @@
 
 define('forum/post-queue', [
 	'categoryFilter', 'categorySelector', 'api', 'alerts',
-	'translator', 'bootbox', 'accounts/moderate', 'accounts/delete',
-	'autocomplete', 'uploader',
+	'translator', 'modals', 'accounts/moderate', 'accounts/delete',
+	'autocomplete', 'uploader', 'benchpress', 'helpers',
 ], function (
-	categoryFilter, categorySelector, api, alerts, translator,
-	bootbox, AccountModerate, AccountsDelete, autocomplete, uploader
+	categoryFilter, categorySelector, api, alerts,
+	translator, modals, AccountModerate, AccountsDelete,
+	autocomplete, uploader, Benchpress, helpers
 ) {
 	const PostQueue = {};
 
@@ -121,16 +122,16 @@ define('forum/post-queue', [
 			const linkList = linkContainer.find('[component="post-queue/link-container/list"]');
 			const linksInPost = $el.find('.post-content a');
 			linksInPost.each((idx, link) => {
-				const href = $(link).attr('href');
+				const href = helpers.escape($(link).attr('href'));
 				linkList.append(`<li><a href="${href}">${href}</a></li>`);
 			});
 			linkContainer.toggleClass('hidden', !linksInPost.length);
 		});
 	}
 
-	function confirmReject(msg) {
+	function confirmModal(msg) {
 		return new Promise((resolve) => {
-			bootbox.confirm(msg, resolve);
+			modals.confirm(msg, resolve);
 		});
 	}
 
@@ -167,34 +168,47 @@ define('forum/post-queue', [
 		});
 	}
 
-	function handleCategoryChange(categoryEl) {
-		const $this = $(categoryEl);
-		const id = $this.parents('[data-id]').attr('data-id');
+	function handleCategoryChange(categoryEl, { apiParam = 'cid', isCrosspost } = {}) {
+		const postEl = categoryEl.closest('[data-id]');
+		const id = postEl.getAttribute('data-id');
+		const crosspostSection = isCrosspost ? postEl.querySelector('[data-crosspost]') : null;
+
 		categorySelector.modal({
+			localOnly: true,
+			openOnLoad: true,
 			onSubmit: function (selectedCategory) {
 				Promise.all([
 					api.get(`/categories/${selectedCategory.cid}`, {}),
 					api.put(`/posts/queue/${id}`, {
-						cid: selectedCategory.cid,
+						[apiParam]: selectedCategory.cid,
 					}),
 				]).then(function (result) {
 					const category = result[0];
+					const postData = {};
+					if (isCrosspost) {
+						postData.crosspostCategory = category;
+						postData.type = 'crosspost';
+					} else {
+						postData.category = category;
+					}
 					app.parseAndTranslate('post-queue', 'posts', {
-						posts: [{
-							category: category,
-						}],
+						posts: [postData],
 					}, function (html) {
-						if ($this.find('.category-text').length) {
-							$this.find('.category-text').text(html.find('.topic-category .category-text').text());
+						if (crosspostSection) {
+							const newCrosspost = html.find('[data-crosspost]')[0];
+							if (newCrosspost) {
+								crosspostSection.outerHTML = newCrosspost.outerHTML;
+							}
 						} else {
-							// for backwards compatibility, remove in 1.16.0
-							$this.replaceWith(html.find('.topic-category'));
+							const newCategory = html.find('.topic-category')[0];
+							if (newCategory) {
+								categoryEl.replaceWith(newCategory);
+							}
 						}
 					});
 				}).catch(alerts.error);
 			},
 		});
-		return false;
 	}
 
 	function handleTagChange(postEl) {
@@ -250,9 +264,18 @@ define('forum/post-queue', [
 					const action = subselector.getAttribute('data-action');
 					const uid = subselector.closest('[data-uid]').getAttribute('data-uid');
 					switch (action) {
+						case 'editTitle':
+						case 'editContent':
+							// handled in handleContentEdit
+							break;
 						case 'editCategory': {
-							const categoryEl = e.target.closest('[data-id]').querySelector('.topic-category');
-							handleCategoryChange(categoryEl);
+							const postEl = e.target.closest('[data-id]');
+							const isCrosspost = e.target.closest('[data-crosspost]');
+							const categoryEl = isCrosspost ?
+								postEl.querySelector('[data-crosspost] .topic-category') :
+								postEl.querySelector('.topic-category');
+							const apiParam = isCrosspost ? 'crosspostCid' : 'cid';
+							handleCategoryChange(categoryEl, { apiParam, isCrosspost: !!isCrosspost });
 							break;
 						}
 
@@ -330,12 +353,13 @@ define('forum/post-queue', [
 	async function handleReject(btn) {
 		const parent = $(btn).parents('[data-id]');
 		const id = parent.attr('data-id');
-		const translationString = ajaxify.data.canAccept ?
-			'[[post-queue:confirm-reject]]' :
-			'[[post-queue:confirm-remove]]';
-
-		const message = await getMessage(translationString);
-		if (message === false) {
+		let message;
+		if (ajaxify.data.canAccept) {
+			message = await getMessage('[[post-queue:confirm-reject]]');
+			if (message === false) {
+				return;
+			}
+		} else if (!await confirmModal('[[post-queue:confirm-remove]]')) {
 			return;
 		}
 		doAction('reject', id, message).then(() => removePostQueueElement(parent)).catch(alerts.error);
@@ -365,51 +389,52 @@ define('forum/post-queue', [
 	}
 
 	async function getMessage(title) {
-		const reasons = await socket.emit('user.getCustomReasons', { type: 'post-queue' });
-		const html = await app.parseAndTranslate('partials/custom-reason', { reasons });
-
-		return new Promise((resolve) => {
+		let done;
+		const userInputPromise = new Promise((resolve) => {
 			let resolved = false;
-			const done = (value) => {
+			done = (value) => {
 				if (resolved) {
 					return;
 				}
 				resolved = true;
 				resolve(value);
 			};
+		});
 
-			const modal = bootbox.dialog({
-				title: title,
-				message: `<form class="form">${html.html()}</form>`,
-				show: true,
-				onEscape: true,
-				buttons: {
-					close: {
-						label: '[[global:close]]',
-						className: 'btn-link',
-						callback: function () {
-							done(false);
-						},
-					},
-					submit: {
-						label: '[[modules:bootbox.confirm]]',
-						callback: function () {
-							done(modal.find('[name="reason"]').val());
-						},
+		const reasons = ajaxify.data.customReasons || [];
+		const html = await Benchpress.render('partials/custom-reason', { reasons });
+		const modal = await modals.dialog({
+			title: title,
+			message: `<form class="form">${html}</form>`,
+			show: true,
+			onEscape: true,
+			buttons: {
+				close: {
+					label: '[[global:close]]',
+					className: 'btn-link',
+					callback: function () {
+						done(false);
 					},
 				},
-			});
-
-			modal.on('hidden.bs.modal', () => {
-				done(false);
-			});
-			modal.find('[data-key]').on('click', function () {
-				const reason = reasons.find(r => String(r.key) === $(this).attr('data-key'));
-				if (reason && reason.body) {
-					modal.find('[name="reason"]').val(translator.unescape(reason.body));
-				}
-			});
+				submit: {
+					label: '[[modules:bootbox.confirm]]',
+					callback: function () {
+						done(modal.find('[name="reason"]').val());
+					},
+				},
+			},
 		});
+
+		modal.on('hidden.bs.modal', () => {
+			done(false);
+		});
+		modal.find('[data-key]').on('click', function () {
+			const reason = reasons.find(r => String(r.key) === $(this).attr('data-key'));
+			if (reason && reason.body) {
+				modal.find('[name="reason"]').val(reason.body);
+			}
+		});
+		return userInputPromise;
 	}
 
 	async function doAction(action, id, message = '') {
@@ -439,7 +464,7 @@ define('forum/post-queue', [
 			const translationString = ajaxify.data.canAccept ?
 				`${bulkAction}-confirm` :
 				`${bulkAction.replace(/^reject/, 'remove')}-confirm`;
-			if (!ids.length || (showConfirm && !(await confirmReject(`[[post-queue:${translationString}, ${ids.length}]]`)))) {
+			if (!ids.length || (showConfirm && !(await confirmModal(`[[post-queue:${translationString}, ${ids.length}]]`)))) {
 				return;
 			}
 			const action = bulkAction.split('-')[0];

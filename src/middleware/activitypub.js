@@ -40,28 +40,37 @@ middleware.assertS2S = async function (req, res, next) {
 };
 
 middleware.verify = async function (req, res, next) {
-	// Verifies the HTTP Signature if present (required for POST)
-	const passthrough = [/\/actor/, /\/uid\/\d+/];
-	if (passthrough.some(regex => regex.test(req.path))) {
+	// Skip verification for GET /actor
+	if (req.method === 'GET' && req.path === '/actor') {
 		return next();
 	}
 
+	// Verifies the HTTP Signature if present (required for POST, optional for GET)
 	if (req.headers.hasOwnProperty('signature')) {
 		const verified = await activitypub.verify(req);
 		if (!verified) {
 			activitypub.helpers.log('[middleware/activitypub] HTTP signature verification failed.');
-			return res.sendStatus(400);
+			if (req.method === 'POST') {
+				return res.sendStatus(400);
+			}
+			// Signed GET with invalid signature: treat as anonymous and proceed
+			activitypub.helpers.log('[middleware/activitypub] Treating signed GET as anonymous.');
+			return next();
 		}
 
 		// Set calling user
-		const keyId = req.headers.signature.split(',').filter(line => line.startsWith('keyId="'));
+		const keyId = req.headers.signature.split(',').filter(line => line.trim().startsWith('keyId="'));
 		if (keyId.length) {
-			req.uid = keyId.shift().slice(7, -1).replace(/#.*$/, '');
+			req.uid = keyId.at(-1).trim().slice(7, -1).replace(/#.*$/, '');
 		}
 
 		activitypub.helpers.log('[middleware/activitypub] HTTP signature verification passed.');
+	} else if (req.method === 'POST') {
+		// HTTP Signatures are mandatory for POST (ActivityPub S2S spec)
+		activitypub.helpers.log('[middleware/activitypub] HTTP signature required for POST but not present.');
+		return res.sendStatus(401);
 	} else {
-		activitypub.helpers.log('[middleware/activitypub] HTTP signature verification skipped.');
+		activitypub.helpers.log('[middleware/activitypub] HTTP signature verification skipped (GET).');
 	}
 	next();
 };
@@ -105,12 +114,13 @@ middleware.assertPayload = helpers.try(async function (req, res, next) {
 
 	// Domain check
 	const { hostname } = new URL(actor);
-	const allowed = await activitypub.instances.isAllowed(hostname);
-	if (!allowed) {
+	const result = await activitypub.instances.isAllowed(hostname);
+	activitypub.instances.log(hostname);
+
+	if (!result.allowed) {
 		activitypub.helpers.log(`[middleware/activitypub] Blocked incoming activity from ${hostname}.`);
 		return res.sendStatus(403);
 	}
-	activitypub.instances.log(hostname);
 
 	// Origin checking
 	if (typeof object !== 'string' && object.hasOwnProperty('id')) {
@@ -121,6 +131,7 @@ middleware.assertPayload = helpers.try(async function (req, res, next) {
 			activitypub.helpers.log('[middleware/activitypub] Origin check failed, stripping object down to id.');
 			req.body.object = [object.id];
 		}
+
 		activitypub.helpers.log('[middleware/activitypub] Origin check passed.');
 	}
 
@@ -134,7 +145,7 @@ middleware.assertPayload = helpers.try(async function (req, res, next) {
 	const { signature } = req.headers;
 	let keyId = new Map(signature.split(',').filter(Boolean).map((v) => {
 		const index = v.indexOf('=');
-		return [v.substring(0, index), v.slice(index + 1)];
+		return [v.substring(0, index).trim(), v.slice(index + 1)];
 	})).get('keyId');
 	keyId = (keyId || '').slice(1, -1).replace(/#[\w-]+$/, '');
 	if (compare !== keyId) {

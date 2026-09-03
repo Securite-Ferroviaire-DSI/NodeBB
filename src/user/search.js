@@ -50,7 +50,9 @@ module.exports = function (User) {
 					} else {
 						const assertion = await activitypub.actors.assert([handle || data.query]);
 						if (assertion === true) {
-							uids = [handle ? await User.getUidByUserslug(handle) : query];
+							// Actor already exists; resolve UID from webfinger cache
+							const cached = handle ? activitypub.helpers._webfingerCache.get(handle) : null;
+							uids = cached ? [cached.actorUri] : [handle ? await User.getUidByUserslug(handle) : query];
 						} else if (Array.isArray(assertion) && assertion.length) {
 							uids = assertion.map(u => u.id);
 						}
@@ -58,6 +60,7 @@ module.exports = function (User) {
 				}
 			}
 
+			// For partial queries, search both local and remote users in parallel
 			if (!uids.length) {
 				const searchMethod = data.findUids || findUids;
 				const promises = [
@@ -74,6 +77,12 @@ module.exports = function (User) {
 				uids = (await Promise.all(promises)).flat();
 			}
 		}
+
+		// Allow plugins to short-circuit with their own results
+		const hookResult = await plugins.hooks.fire('filter:users.searchOverride', {
+			query, searchBy, uids, uid, hardCap: data.hardCap,
+		});
+		uids = hookResult.uids;
 
 		uids = await filterAndSortUids(uids, data);
 		if (data.hardCap > 0) {
@@ -103,7 +112,7 @@ module.exports = function (User) {
 		if (blocks.length) {
 			userData.forEach((user) => {
 				if (user) {
-					user.isBlocked = blocks.includes(user.uid);
+					user.isBlocked = blocks.includes(String(user.uid));
 				}
 			});
 		}

@@ -56,6 +56,8 @@ paths:
     $ref: 'write/login.yaml'
   /users/:
     $ref: 'write/users.yaml'
+  /users/reauth/verify:
+    $ref: 'write/users/reauth/verify.yaml'
   /users/{uid}:
     $ref: 'write/users/uid.yaml'
   /users/{uid}/picture:
@@ -306,10 +308,18 @@ paths:
     $ref: 'write/admin/activitypub/relays/url.yaml'
   /admin/activitypub/blocklists:
     $ref: 'write/admin/activitypub/blocklists.yaml'
+  /admin/activitypub/blocklists/core:
+    $ref: 'write/admin/activitypub/blocklists/core.yaml'
   /admin/activitypub/blocklists/{url}:
     $ref: 'write/admin/activitypub/blocklists/url.yaml'
   /admin/activitypub/blocklists/{url}/refresh:
     $ref: 'write/admin/activitypub/blocklists/url/refresh.yaml'
+  /admin/plugins/{pluginId}:
+    $ref: 'write/admin/plugins/pluginId.yaml'
+  /admin/plugins/{pluginId}/active:
+    $ref: 'write/admin/plugins/pluginId/active.yaml'
+  /admin/plugins/{pluginId}/upgrade:
+    $ref: 'write/admin/plugins/pluginId/upgrade.yaml'
   /files/:
     $ref: 'write/files.yaml'
   /files/folder:

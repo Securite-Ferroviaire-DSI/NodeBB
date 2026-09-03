@@ -75,7 +75,7 @@ privsTopics.get = async function (tid, uid) {
 		editable: editable,
 		deletable: deletable,
 		canMoveOwnTopic: canMoveOwnTopic,
-		view_deleted: isAdminOrMod || isOwner || privData['posts:view_deleted'],
+		view_deleted: isAdministrator || isOwner || privData['posts:view_deleted'],
 		view_scheduled: privData['topics:schedule'] || isAdministrator,
 		isAdminOrMod: isAdminOrMod,
 		disabled: disabled,
@@ -143,6 +143,20 @@ privsTopics.filterUids = async function (privilege, tid, uids) {
 			((allowedTo[index] && (topicData.scheduled || !topicData.deleted)) || isAdmins[index]));
 };
 
+privsTopics.canRead = async function (tid, uid) {
+	tid = String(tid);
+	const [userPrivileges, topic] = await Promise.all([
+		privsTopics.get(tid, uid),
+		topics.getTopicData(tid),
+	]);
+	return (
+		topic &&
+		userPrivileges['topics:read'] &&
+		!userPrivileges.disabled &&
+		privsTopics.canViewDeletedScheduled(topic, userPrivileges)
+	);
+};
+
 privsTopics.canPurge = async function (tid, uid) {
 	const cid = await topics.getTopicField(tid, 'cid');
 	let [purge, owner, isAdmin, isModerator] = await Promise.all([
@@ -183,6 +197,15 @@ privsTopics.canDelete = async function (tid, uid) {
 
 	const { deleterUid } = topicData;
 	return allowedTo[0] && ((isOwner && (deleterUid === 0 || deleterUid === topicData.uid)) || isModerator);
+};
+
+privsTopics.canTag = async function (tid, uid) {
+	const [isOwner, canTag, isAdminOrMod] = await Promise.all([
+		topics.isOwner(tid, uid),
+		privsTopics.can('topics:tag', tid, uid),
+		privsTopics.isAdminOrMod(tid, uid),
+	]);
+	return (isOwner && canTag) || isAdminOrMod;
 };
 
 privsTopics.canEdit = async function (tid, uid) {

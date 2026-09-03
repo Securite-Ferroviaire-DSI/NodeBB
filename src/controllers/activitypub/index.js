@@ -6,6 +6,7 @@ const winston = require('winston');
 const db = require('../../database');
 const meta = require('../../meta');
 const posts = require('../../posts');
+const topics = require('../../topics');
 const user = require('../../user');
 const groups = require('../../groups');
 const privileges = require('../../privileges');
@@ -48,7 +49,7 @@ Controller.fetch = async (req, res, next) => {
 				}
 
 				default:
-					return helpers.redirect(res, url.href, false);
+					return helpers.redirect(res, { external: url.href });
 			}
 		}
 
@@ -59,13 +60,13 @@ Controller.fetch = async (req, res, next) => {
 			url = new URL(`outgoing?url=${encodeURIComponent(url.href)}`, nconf.get('url'));
 		}
 
-		helpers.redirect(res, url.href, false);
+		helpers.redirect(res, { external: url.href });
 	} catch (e) {
 		if (!url || !url.href) {
 			return next();
 		}
 		activitypub.helpers.log(`[activitypub/fetch] Invalid URL received: ${url}`);
-		helpers.redirect(res, url.href, false);
+		helpers.redirect(res, { external: url.href });
 	}
 };
 
@@ -122,13 +123,22 @@ Controller.getOutbox = async (req, res) => {
 	const { uid } = req.params;
 	let { after, before } = req.query;
 
-	let totalItems = await db.sortedSetsCard([`uid:${uid}:posts`, `uid:${uid}:upvote`, `uid:${uid}:downvote`, `uid:${uid}:shares`]);
-	totalItems = totalItems.reduce((sum, count) => {
-		sum += count;
-		return sum;
-	}, 0);
-
 	const perPage = 20;
+	const callerUid = req.uid || 0;
+
+	// Resolve visible categories — posts are drawn only from these
+	let userCids = await db.getSortedSetRange(`uid:${uid}:cids`, 0, -1);
+	userCids = await privileges.categories.filterCids('topics:read', userCids, callerUid);
+	const postSets = userCids.map(cid => `cid:${cid}:uid:${uid}:pids`);
+
+	// Total count: visible posts + all votes/shares (votes/shares filtered later)
+	let totalPostCount = await db.sortedSetsCard(postSets);
+	totalPostCount = totalPostCount.reduce((sum, count) => sum + count, 0);
+	const [totalUpvote, totalDownvote, totalShare] = await db.sortedSetsCard([
+		`uid:${uid}:upvote`, `uid:${uid}:downvote`, `uid:${uid}:shares`,
+	]);
+	const totalItems = totalPostCount + totalUpvote + totalDownvote + totalShare;
+
 	let paginate = true;
 	if (totalItems <= perPage) {
 		before = undefined;
@@ -138,66 +148,133 @@ Controller.getOutbox = async (req, res) => {
 
 	let prev;
 	let next;
-	const partOf = paginate && (after || before) && `${nconf.get('url')}/uid/${uid}/outbox`;
+	const partOf = paginate && `${nconf.get('url')}/uid/${uid}/outbox`;
 	const first = paginate && !after && !before && `${nconf.get('url')}/uid/${uid}/outbox?after=${Date.now()}`;
 	const last = paginate && !after && !before && `${nconf.get('url')}/uid/${uid}/outbox?before=0`;
 	let activities;
+	let upvotes, downvotes, shares;
 
-	if (!paginate || after || before) {
+	// Pre-declare for topic filtering
+	let postsData = [];
+	let postTids;
+	let hiddenTids = new Set();
+
+	// Fetch enough from each source so that after merging by score and filtering votes/shares,
+	// we still have perPage items. Posts are pre-filtered via category sets; votes/shares are filtered after.
+	const fetchLimit = (perPage * 4) - 1;
+
+	if (after || before) {
 		const limit = after ? parseInt(after, 10) - 1 : parseInt(before, 10) + 1;
 		const method = after ? 'getSortedSetRevRangeByScoreWithScores' : 'getSortedSetRangeByScoreWithScores';
 
-		const [post, upvote, downvote, share] = await Promise.all([
-			db[method](`uid:${uid}:posts`, 0, 20, limit, `${after ? '-' : '+'}inf`),
-			db[method](`uid:${uid}:upvote`, 0, 20, limit, `${after ? '-' : '+'}inf`),
-			db[method](`uid:${uid}:downvote`, 0, 20, limit, `${after ? '-' : '+'}inf`),
-			db[method](`uid:${uid}:shares`, 0, 20, limit, `${after ? '-' : '+'}inf`),
+		[activities, upvotes, downvotes, shares] = await Promise.all([
+			db[method](postSets, 0, fetchLimit, limit, `${after ? '-' : '+'}inf`),
+			db[method](`uid:${uid}:upvote`, 0, fetchLimit, limit, `${after ? '-' : '+'}inf`),
+			db[method](`uid:${uid}:downvote`, 0, fetchLimit, limit, `${after ? '-' : '+'}inf`),
+			db[method](`uid:${uid}:shares`, 0, fetchLimit, limit, `${after ? '-' : '+'}inf`),
 		]);
-		activities = [
-			post.map(post => ({ ...post, type: 'post' })),
-			upvote.map(upvote => ({ ...upvote, type: 'upvote' })),
-			downvote.map(downvote => ({ ...downvote, type: 'downvote' })),
-			share.map(share => ({ ...share, type: 'share' })),
-		].flat().sort((a, b) => b.score - a.score);
-		if (after) {
-			activities = activities.slice(0, 20);
-		} else {
-			activities = activities.slice(-20);
+	} else {
+		// Reverse range: fetch newest items first (mergeBatch descending)
+		[activities, upvotes, downvotes, shares] = await Promise.all([
+			db.getSortedSetRevRangeWithScores(postSets, 0, fetchLimit),
+			db.getSortedSetRevRangeWithScores(`uid:${uid}:upvote`, 0, fetchLimit),
+			db.getSortedSetRevRangeWithScores(`uid:${uid}:downvote`, 0, fetchLimit),
+			db.getSortedSetRevRangeWithScores(`uid:${uid}:shares`, 0, fetchLimit),
+		]);
+	}
+
+	let allActivities = [
+		...(activities || []).map(item => ({ ...item, type: 'post' })),
+		...(upvotes || []).map(item => ({ ...item, type: 'upvote' })),
+		...(downvotes || []).map(item => ({ ...item, type: 'downvote' })),
+		...(shares || []).map(item => ({ ...item, type: 'share' })),
+	].sort((a, b) => b.score - a.score);
+
+	// Filter votes/shares to only those targeting visible posts
+	if (allActivities.length) {
+		const voteSharePids = allActivities
+			.filter(({ type }) => type !== 'post')
+			.map(({ value }) => value);
+		if (voteSharePids.length) {
+			const visibleVotePids = await privileges.posts.filter('topics:read', voteSharePids, callerUid);
+			const visibleVoteSet = new Set(visibleVotePids);
+			allActivities = allActivities.filter(({ type, value }) => {
+				if (type === 'post') return true; // topic filtering below
+				return visibleVoteSet.has(value);
+			});
 		}
 
-		if (activities.length) {
-			prev = `${nconf.get('url')}/uid/${uid}/outbox?before=${activities[0].score}`;
-			next = `${nconf.get('url')}/uid/${uid}/outbox?after=${activities[19].score}`;
+		// Fetch post summaries for topic deletion/scheduled check
+		const postItems = allActivities.filter(({ type }) => type === 'post');
+		if (postItems.length) {
+			postsData = await posts.getPostSummaryByPids(
+				postItems.map(({ value }) => value), callerUid, { stripTags: false }
+			);
+			postTids = [...new Set(postsData.map(p => p.tid).filter(Boolean))];
+			if (postTids.length) {
+				const topicData = await topics.getTopicsFields(postTids, ['tid', 'deleted', 'scheduled']);
+				hiddenTids = new Set(
+					topicData.filter(t => t.deleted || t.scheduled > Date.now()).map(t => t.tid)
+				);
+			}
 
-			let postsData = activities.filter((({ type }) => type === 'post'));
-			postsData = await posts.getPostSummaryByPids(postsData.map(({ value }) => value), 0, { stripTags: false });
-			postsData = postsData.reduce((map, postData) => {
+			// Filter out posts and votes/shares targeting hidden posts
+			if (hiddenTids.size) {
+				const postTidMap = postsData.reduce((map, p) => {
+					if (p.tid) map.set(p.pid, p.tid);
+					return map;
+				}, new Map());
+				allActivities = allActivities.filter(({ type, value }) => {
+					const pid = parseInt(value, 10);
+					if (type === 'post') return !hiddenTids.has(postTidMap.get(pid));
+					const targetTid = postTidMap.get(pid);
+					return targetTid !== undefined ? !hiddenTids.has(targetTid) : true;
+				});
+			}
+		}
+
+		// Slice to perPage
+		if (!paginate || before) {
+			allActivities = allActivities.slice(-perPage);
+		} else {
+			allActivities = allActivities.slice(0, perPage);
+		}
+	}
+
+	if (allActivities.length) {
+		prev = `${nconf.get('url')}/uid/${uid}/outbox?before=${allActivities[0].score}`;
+		next = `${nconf.get('url')}/uid/${uid}/outbox?after=${allActivities[allActivities.length - 1].score}`;
+
+		const postsMap = (postsData || [])
+			.filter(p => !hiddenTids.has(p.tid))
+			.reduce((map, postData) => {
 				map.set(postData.pid, postData);
 				return map;
 			}, new Map());
 
-			activities = await Promise.all(activities.map(async ({ type, value: id }) => {
-				switch (type) {
-					case 'post': {
-						const { activity } = await activitypub.mocks.activities.create(id, 0, postsData.get(id));
-						return activity;
-					}
-
-					case 'upvote': {
-						return activitypub.mocks.activities.like(id, uid);
-					}
-
-					case 'downvote': {
-						return activitypub.mocks.activities.dislike(id, uid);
-					}
-
-					case 'share': {
-						const { activity } = await activitypub.mocks.activities.announce(id, uid);
-						return activity;
-					}
+		activities = await Promise.all(allActivities.map(async ({ type, value: id }) => {
+			switch (type) {
+				case 'post': {
+					const { activity } = await activitypub.mocks.activities.create(id, 0, postsMap.get(id));
+					return activity;
 				}
-			}));
-		}
+
+				case 'upvote': {
+					return activitypub.mocks.activities.like(id, uid);
+				}
+
+				case 'downvote': {
+					return activitypub.mocks.activities.dislike(id, uid);
+				}
+
+				case 'share': {
+					const { activity } = await activitypub.mocks.activities.announce(id, uid);
+					return activity;
+				}
+			}
+		}));
+	} else {
+		activities = [];
 	}
 
 	res.status(200).json({
@@ -322,14 +399,15 @@ Controller.postInbox = async (req, res) => {
 		return res.sendStatus(200);
 	}
 
+	const originalBody = structuredClone(req.body);
 	try {
 		await activitypub.inbox[method](req);
 		await activitypub.analytics.receipt(req.body);
 		await helpers.formatApiResponse(202, res);
 	} catch (e) {
-		activitypub.analytics.receiptError(req.body, e);
-		if (req.body?.type && req.body?.object && req.body?.actor) {
-			activitypub.inbox._reject(req.body.type, req.body.object, req.body.actor);
+		activitypub.analytics.receiptError(originalBody, e);
+		if (originalBody?.type && originalBody?.object && originalBody?.actor) {
+			activitypub.inbox._reject(originalBody.type, originalBody.object, originalBody.actor);
 		} else {
 			helpers.formatApiResponse(500, res, e).catch(err => winston.error(err.stack));
 		}

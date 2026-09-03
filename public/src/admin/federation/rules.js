@@ -5,6 +5,7 @@ import { error } from 'alerts';
 import { render } from 'benchpress';
 import { translate } from 'translator';
 import * as categorySelector from 'categorySelector';
+import * as modals from 'modals';
 
 export function init() {
 	setupRules();
@@ -29,10 +30,10 @@ function setupRules() {
 				case 'rules.delete': {
 					const rid = subselector.closest('tr').getAttribute('data-rid');
 					del(`/admin/activitypub/rules/${rid}`, {}).then(async (data) => {
-						const html = await render('admin/federation/rules', { rules: data }, 'rules');
+						const html = await app.parseAndTranslate('admin/federation/rules', 'rules', { rules: data });
 						const tbodyEl = document.querySelector('#rules tbody');
 						if (tbodyEl) {
-							tbodyEl.innerHTML = html;
+							$(tbodyEl).html(html);
 						}
 					}).catch(error);
 				}
@@ -65,7 +66,7 @@ function setupRules() {
 }
 
 function throwModal() {
-	render('admin/partials/activitypub/rules', {}).then(function (html) {
+	render('admin/partials/activitypub/rules', {}).then(async function (html) {
 		const submit = function () {
 			const formEl = modal.find('form').get(0);
 			if (!formEl.reportValidity()) {
@@ -73,18 +74,19 @@ function throwModal() {
 			}
 
 			const payload = Object.fromEntries(new FormData(formEl));
+			payload.action = parseInt(payload.action, 10);
 			post('/admin/activitypub/rules', payload).then(async (data) => {
-				const html = await render('admin/federation/rules', { rules: data }, 'rules');
+				const html = await app.parseAndTranslate('admin/federation/rules', 'rules', { rules: data });
 				const tbodyEl = document.querySelector('#rules tbody');
 				if (tbodyEl) {
-					tbodyEl.innerHTML = html;
+					$(tbodyEl).html(html);
 				}
 				modal.modal('hide');
 			}).catch(error);
 
 			return false;
 		};
-		const modal = bootbox.dialog({
+		const modal = await modals.dialog({
 			title: '[[admin/settings/activitypub:rules.add]]',
 			message: html,
 			buttons: {
@@ -97,9 +99,22 @@ function throwModal() {
 		});
 
 		modal.on('shown.bs.modal', function () {
-			modal.find('input').focus();
+			modal.find('#value').focus();
 		});
 
+		// live update action label
+		const actionEl = modal.get(0).querySelector('#action');
+		const labelsEl = modal.get(0).querySelector('#action-labels');
+		if (actionEl && labelsEl) {
+			const labels = labelsEl.querySelectorAll('span');
+			const updateActionLabel = () => {
+				labels.forEach((l, i) => {
+					l.style.fontWeight = i === parseInt(actionEl.value, 10) ? 'bold' : 'normal';
+				});
+			};
+			updateActionLabel();
+			actionEl.addEventListener('input', updateActionLabel);
+		}
 
 		// help text
 		const updateHelp = async (key, el) => {
@@ -123,6 +138,7 @@ function throwModal() {
 			cacheList: false,
 			showLinks: true,
 			template: 'admin/partials/category/selector-dropdown-right',
+			localOnly: true,
 		});
 	});
 }

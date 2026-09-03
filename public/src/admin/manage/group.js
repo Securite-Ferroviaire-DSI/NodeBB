@@ -3,17 +3,16 @@
 define('admin/manage/group', [
 	'forum/groups/memberlist',
 	'iconSelect',
-	'translator',
 	'categorySelector',
 	'groupSearch',
 	'slugify',
 	'api',
-	'bootbox',
+	'modals',
 	'alerts',
 	'admin/settings',
 ], function (
-	memberList, iconSelect, translator, categorySelector, groupSearch,
-	slugify, api, bootbox, alerts, settings
+	memberList, iconSelect, categorySelector, groupSearch,
+	slugify, api, modals, alerts, settings
 ) {
 	const Groups = {};
 
@@ -89,7 +88,7 @@ define('admin/manage/group', [
 		});
 
 		$('[data-action="delete"]').on('click', function () {
-			bootbox.confirm('[[admin/manage/groups:alerts.confirm-delete]]', function (confirm) {
+			modals.confirm('[[admin/manage/groups:alerts.confirm-delete]]', function (confirm) {
 				if (confirm) {
 					api.del(`/groups/${slugify(ajaxify.data.group.name)}`, {}).then(() => {
 						ajaxify.go('/admin/manage/groups');
@@ -136,20 +135,16 @@ define('admin/manage/group', [
 
 			switch (action) {
 				case 'toggleOwnership':
-					api[isOwner ? 'del' : 'put'](`/groups/${ajaxify.data.group.slug}/ownership/${uid}`, {}).then(() => {
+					memberList.toggleOwnership(ajaxify.data.group.slug, uid, isOwner).then(() => {
 						ownerFlagEl.toggleClass('invisible');
+						userRow.attr('data-isowner', isOwner ? '0' : '1');
 					}).catch(alerts.error);
 					break;
 
 				case 'kick':
-					bootbox.confirm('[[admin/manage/groups:edit.confirm-remove-user]]', function (confirm) {
-						if (!confirm) {
-							return;
-						}
-						api.del('/groups/' + ajaxify.data.group.slug + '/membership/' + uid).then(() => {
-							userRow.slideUp().remove();
-						}).catch(alerts.error);
-					});
+					memberList.kickMember(ajaxify.data.group.slug, uid).then(() => {
+						userRow.remove();
+					}).catch(alerts.error);
 					break;
 				default:
 					break;
@@ -161,13 +156,11 @@ define('admin/manage/group', [
 		if (cid) {
 			const url = 'admin/manage/privileges/' + cid + '?group=' + ajaxify.data.group.nameEncoded;
 			if (app.flags && app.flags._unsaved === true) {
-				translator.translate('[[global:unsaved-changes]]', function (text) {
-					bootbox.confirm(text, function (navigate) {
-						if (navigate) {
-							app.flags._unsaved = false;
-							ajaxify.go(url);
-						}
-					});
+				modals.confirm('[[global:unsaved-changes]]', function (navigate) {
+					if (navigate) {
+						app.flags._unsaved = false;
+						ajaxify.go(url);
+					}
 				});
 				return;
 			}

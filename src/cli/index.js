@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 require('../../require-main');
+require('../../nodebb-global');
 
 // https://github.com/NodeBB/NodeBB/issues/13734
 // check dev flag early so packageInstall.installAll() can use it
@@ -69,14 +70,14 @@ try {
 			}
 		});
 
-		const chalk = require('chalk');
+		const chalk = require('chalk').default;
 		console.log(`${chalk.green('OK')}\n`);
 	} else {
 		throw e;
 	}
 }
 
-const chalk = require('chalk');
+const chalk = require('chalk').default;
 const nconf = require('nconf');
 const { program } = require('commander');
 const yargs = require('yargs');

@@ -18,18 +18,18 @@ controller.list = async function (req, res) {
 		return helpers.redirect(res, '/world?local=1', false);
 	}
 
-	const { topicsPerPage } = await user.getSettings(req.uid);
+	const userSettings = await user.getSettings(req.uid);
 	let { page, after } = req.query;
 	page = parseInt(page, 10) || 1;
-	let start = Math.max(0, (page - 1) * topicsPerPage);
-	let stop = start + topicsPerPage - 1;
+	let start = Math.max(0, (page - 1) * userSettings.topicsPerPage);
+	let stop = start + userSettings.topicsPerPage - 1;
 
-	const [userSettings, userPrivileges, isAdminOrGlobalMod, selectedCategory] = await Promise.all([
-		user.getSettings(req.uid),
+	const [userPrivileges, isAdminOrGlobalMod, selectedCategory] = await Promise.all([
 		privileges.categories.get('-1', req.uid),
 		user.isAdminOrGlobalMod(req.uid),
 		categories.getCategoryData(meta.config.activitypubWorldDefaultCid),
 	]);
+
 	const targetUid = await user.getUidByUserslug(req.query.author);
 	let cidQuery = {
 		uid: req.uid,
@@ -46,6 +46,7 @@ controller.list = async function (req, res) {
 		thumbsOnly: 1,
 	};
 	const data = await categories.getCategoryById(cidQuery);
+
 	delete data.children;
 	data.sort = req.query.sort;
 	data.privileges = userPrivileges;
@@ -104,17 +105,22 @@ controller.list = async function (req, res) {
 	data.topicCount = topicCount;
 
 	const mainPids = await topics.getMainPids(tids);
-	const postData = await posts.getPostSummaryByPids(mainPids, req.uid, {
-		stripTags: false,
-		extraFields: ['bookmarks'],
-	});
+	const [postData, postPrivileges] = await Promise.all([
+		posts.getPostSummaryByPids(mainPids, req.uid, {
+			stripTags: false,
+			extraFields: ['bookmarks'],
+		}),
+		privileges.posts.get(mainPids, req.uid),
+	]);
+	postData.forEach(
+		(postData, index) => posts.modifyPostByPrivilege(postData, postPrivileges[index])
+	);
 	const [{ upvotes }, bookmarkStatus] = await Promise.all([
 		posts.getVoteStatusByPostIDs(mainPids, req.uid),
 		posts.hasBookmarked(mainPids, req.uid),
 	]);
 
 	postData.forEach((p, index) => {
-		p.pid = encodeURIComponent(p.pid);
 		if (p.topic) {
 			p.topic = { ...p.topic };
 			p.topic.thumbs = topicData[index].thumbs;
@@ -162,10 +168,10 @@ controller.list = async function (req, res) {
 		data.categories = [];
 	}
 
-	data.title = translator.escape(data.name);
+	data.title = data.name;
 	data.breadcrumbs = helpers.buildBreadcrumbs([]);
 
-	const pageCount = Math.max(1, Math.ceil(data.topicCount / topicsPerPage));
+	const pageCount = Math.max(1, Math.ceil(data.topicCount / userSettings.topicsPerPage));
 	data.pagination = pagination.create(page, pageCount, req.query);
 	helpers.addLinkTags({
 		url: 'world',

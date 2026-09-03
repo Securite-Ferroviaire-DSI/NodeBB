@@ -19,7 +19,8 @@ const ttl = require('../cache/ttl');
 const user = require('../user');
 const activitypub = require('.');
 
-const webfingerRegex = /^(@|acct:)?[\w-.]+@.+$/;
+// \w only matches ASCII, so match unicode letters/numbers/marks explicitly to support non-ASCII handles
+const webfingerRegex = /^(@|acct:)?[\p{L}\p{N}\p{M}_.-]+@.+$/u;
 const webfingerCache = ttl({
 	name: 'ap-webfinger-cache',
 	max: 5000,
@@ -65,7 +66,7 @@ Helpers.isUri = (value) => {
 		require_host: true,
 		protocols: activitypub._constants.acceptedProtocols,
 		require_valid_protocol: true,
-		require_tld: false, // temporary — for localhost
+		require_tld: !meta.config.activitypubAllowLoopback,
 	});
 };
 
@@ -114,7 +115,9 @@ Helpers.query = async (id) => {
 		return cached;
 	}
 
-	const query = new URLSearchParams({ resource: uri });
+	// Build the resource from the raw id; URL serialization percent-encodes non-ASCII
+	// characters, which URLSearchParams would then encode a second time
+	const query = new URLSearchParams({ resource: isUri ? uri.href : `acct:${username}@${hostname}` });
 
 	// Make a webfinger query to retrieve routing information
 	let response;
@@ -135,7 +138,7 @@ Helpers.query = async (id) => {
 	}
 
 	// Parse links to find actor endpoint
-	let actorUri = body.links.filter(link => activitypub._constants.acceptableTypes.includes(link.type) && link.rel === 'self');
+	let actorUri = body.links.filter(link => Helpers.assertAccept(link.type) && link.rel === 'self');
 	if (actorUri.length) {
 		actorUri = actorUri.pop();
 		({ href: actorUri } = actorUri);
@@ -144,10 +147,42 @@ Helpers.query = async (id) => {
 	let { subject, publicKey } = body;
 	// Fix missing scheme
 	if (!subject.startsWith('acct:') && !subject.startsWith('did:')) {
-		subject = `acct:${subject}`;
+		try {
+			new URL(subject);
+		} catch (e) {
+			subject = `acct:${subject}`;
+		}
 	}
+
+	// Validate that the subject's hostname matches the queried hostname.
+	let subjectUrl;
+	try {
+		subjectUrl = new URL(subject);
+	} catch (e) {
+		// Invalid URL — reject the response
+		return false;
+	}
+
+	// Extract hostname from the subject.
+	let subjectHostname;
+	if (subjectUrl.protocol === 'acct:') {
+		// Parse acct:user@hostname from the opaque part
+		const opaque = subjectUrl.pathname;
+		const atIndex = opaque.lastIndexOf('@');
+		if (atIndex === -1) {
+			// No @ in acct: subject — malformed
+			return false;
+		}
+		subjectHostname = opaque.slice(atIndex + 1);
+	} else {
+		subjectHostname = subjectUrl.hostname;
+	}
+	if (subjectHostname !== hostname) {
+		return false;
+	}
+
 	const payload = { subject, username, hostname, actorUri, publicKey, _raw: body };
-	const claimedId = new URL(subject).pathname;
+	const claimedId = subjectUrl.pathname;
 	webfingerCache.set(claimedId, payload);
 	if (claimedId !== id) {
 		webfingerCache.set(id, payload);
@@ -554,6 +589,10 @@ Helpers.renderEmoji = (text, tags, strip = false) => {
 		const isImage = !tag.icon?.mediaType || tag.icon.mediaType.startsWith('image/');
 
 		if (isEmoji && (strip || (hasUrl && isImage))) {
+			if (!Helpers.isUri(tag.icon.url)) {
+				return;
+			}
+
 			let { name } = tag;
 			if (parsed.has(name)) {
 				return;

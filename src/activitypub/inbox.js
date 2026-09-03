@@ -42,6 +42,32 @@ inbox._reject = function (type, object, target, senderType = 'uid', id = 0) {
 inbox.create = async (req) => {
 	const { object, actor } = req.body;
 
+	// attributedTo must be same-origin
+	if (actor && object.attributedTo) {
+		// Normalize `attributedTo` — only handle single values (string or object with id)
+		let { attributedTo } = object;
+		if (Array.isArray(attributedTo)) {
+			activitypub.helpers.log('[activitypub/inbox.create] attributedTo is an array, rejecting.');
+			return null;
+		}
+		if (typeof attributedTo === 'object' && attributedTo.id) {
+			attributedTo = attributedTo.id;
+		}
+
+		if (typeof attributedTo === 'string') {
+			try {
+				const actorHostname = typeof actor === 'string' ? new URL(actor).hostname : new URL(actor[0]).hostname;
+				const attributedToHostname = new URL(attributedTo).hostname;
+				if (actorHostname !== attributedToHostname) {
+					activitypub.helpers.log(`[activitypub/inbox.create] attributedTo origin mismatch (${attributedToHostname} !== ${actorHostname}).`);
+					return null;
+				}
+			} catch (e) {
+				return null;
+			}
+		}
+	}
+
 	// Alternative logic for non-public objects
 	const isPublic = publiclyAddressed([...(object.to || []), ...(object.cc || [])]);
 	if (!isPublic) {
@@ -135,7 +161,7 @@ inbox.move = async (req) => {
 	// Ensure that cid is same-origin as the actor
 	const tid = await posts.getPostField(mainPid, 'tid');
 	const cid = await topics.getTopicField(tid, 'cid');
-	if (utils.isNumber(cid)) {
+	if (utils.isNumber(cid) || cid !== fromCid) {
 		// remote removal of topic in local cid, or resolved cid does not match
 		return;
 	}
@@ -154,7 +180,21 @@ inbox.move = async (req) => {
 };
 
 inbox.update = async (req) => {
-	const { actor, object } = req.body;
+	let { actor, object } = req.body;
+
+	// Refetch object by id if Update was announce-wrapped
+	if (req.res.locals.apAnnounced) {
+		try {
+			const refetched = await activitypub.get('uid', 0, object.id);
+			if (refetched) {
+				object = refetched;
+			}
+		} catch (e) {
+			activitypub.helpers.log(`[activitypub/inbox.update] Failed to refetch object ${object.id}: ${e.message}`);
+			return null;
+		}
+	}
+
 	const isPublic = publiclyAddressed([...(object.to || []), ...(object.cc || [])]);
 
 	// Origin checking
@@ -162,6 +202,32 @@ inbox.update = async (req) => {
 	const objectHostname = new URL(object.id).hostname;
 	if (actorHostname !== objectHostname) {
 		throw new Error('[[error:activitypub.origin-mismatch]]');
+	}
+
+	// attributedTo must be same-origin
+	if (actor && object.attributedTo) {
+		// Normalize `attributedTo` — only handle single values (string or object with id)
+		let { attributedTo } = object;
+		if (Array.isArray(attributedTo)) {
+			activitypub.helpers.log('[activitypub/inbox.update] attributedTo is an array, rejecting.');
+			return null;
+		}
+		if (typeof attributedTo === 'object' && attributedTo.id) {
+			attributedTo = attributedTo.id;
+		}
+
+		if (typeof attributedTo === 'string') {
+			try {
+				const actorHostname = typeof actor === 'string' ? new URL(actor).hostname : new URL(actor[0]).hostname;
+				const attributedToHostname = new URL(attributedTo).hostname;
+				if (actorHostname !== attributedToHostname) {
+					activitypub.helpers.log(`[activitypub/inbox.update] attributedTo origin mismatch (${attributedToHostname} !== ${actorHostname}).`);
+					return null;
+				}
+			} catch (e) {
+				return null;
+			}
+		}
 	}
 
 	switch (true) {
@@ -174,24 +240,32 @@ inbox.update = async (req) => {
 			switch (true) {
 				case isNote: {
 					const cid = await posts.getCidByPid(object.id);
-					const allowed = await privileges.categories.can('posts:edit', cid, activitypub._constants.uid);
+					const [allowed, isDeleted] = await Promise.all([
+						privileges.categories.can('posts:edit', cid, activitypub._constants.uid),
+						posts.getPostField(object.id, 'deleted'),
+					]);
 					if (!allowed) {
 						throw new Error('[[error:no-privileges]]');
+					}
+					if (isDeleted) { // fediverse users can't edit deleted posts
+						await api.posts.restore({ uid: actor }, { pid: object.id });
 					}
 
 					const postData = await activitypub.mocks.post(object);
 					postData.tags = await activitypub.notes._normalizeTags(postData._activitypub.tag, postData.cid);
 					await posts.edit(postData);
+					await activitypub.feps.announce(object.id, req.body);
 					const tid = await posts.getPostField(object.id, 'tid');
-					const { generatedTitle } = await topics.getTopicFields(tid, ['generatedTitle']);
-					if (generatedTitle && (!postData.title || !postData.title.trim())) {
-						const newTitle = activitypub.helpers.generateTitle(postData.content);
-						await topics.setTopicField(tid, 'title', newTitle);
-						await topics.setTopicField(tid, 'slug', `${tid}/${slugify(newTitle) || 'topic'}`);
-					}
-					const isDeleted = await posts.getPostField(object.id, 'deleted');
-					if (isDeleted) {
-						await api.posts.restore({ uid: actor }, { pid: object.id });
+					const isMain = await posts.isMain(object.id);
+					if (isMain) {
+						const { generatedTitle } = await topics.getTopicFields(tid, ['generatedTitle']);
+						if (generatedTitle && (!postData.title || !postData.title.trim())) {
+							const newTitle = activitypub.helpers.generateTitle(postData.sourceContent || postData.content);
+							await topics.setTopicFields(tid, {
+								title: newTitle,
+								slug: `${tid}/${slugify(newTitle) || 'topic'}`,
+							});
+						}
 					}
 					break;
 				}
@@ -332,6 +406,11 @@ inbox.delete = async (req) => {
 		}
 
 		case isMessage: {
+			const deleted = await messaging.getMessageField(id, 'deleted');
+			if (deleted) {
+				return;
+			}
+
 			await api.chats.deleteMessage({ uid: actor }, { mid: id });
 			break;
 		}
@@ -365,14 +444,14 @@ inbox.like = async (req) => {
 			// Proactively pull in the note
 			const asserted = await activitypub.notes.assert(0, object.id, { skipChecks: 1 });
 			if (!asserted) {
-				throw new Error('[[error:invalid-pid]]');
+				return;
 			}
 			exists = true;
 		}
 		id = object.id;
 	}
 	if (!id || !exists) {
-		throw new Error('[[error:invalid-pid]]');
+		return;
 	}
 
 	const allowed = await privileges.posts.can('posts:upvote', id, activitypub._constants.uid);
@@ -383,17 +462,44 @@ inbox.like = async (req) => {
 
 	activitypub.helpers.log(`[activitypub/inbox/like] id ${id} via ${actor}`);
 
-	const result = await posts.upvote(id, actor);
+	let result;
+	try {
+		result = await posts.upvote(id, actor);
+	} catch (e) {
+		if (e.message === '[[error:already-voting-for-this-post]]') {
+			return;
+		}
+		throw e;
+	}
 	await activitypub.feps.announce(object.id, req.body);
 	socketHelpers.upvote(result, 'notifications:upvoted-your-post-in');
 };
 
 inbox.dislike = async (req) => {
 	const { actor, object } = req.body;
-	const { type, id } = await activitypub.helpers.resolveLocalId(object.id);
 
-	if (type !== 'post' || !(await posts.exists(id))) {
-		throw new Error('[[error:invalid-pid]]');
+	let exists;
+	let id;
+	if (object.id.startsWith(nconf.get('url'))) {
+		const { type, id: _id } = await activitypub.helpers.resolveLocalId(object.id);
+		if (type === 'post') {
+			exists = await posts.exists(_id);
+			id = _id;
+		}
+	} else {
+		exists = await posts.exists(object.id);
+		if (!exists) {
+			// Proactively pull in the note
+			const asserted = await activitypub.notes.assert(0, object.id, { skipChecks: 1 });
+			if (!asserted) {
+				return;
+			}
+			exists = true;
+		}
+		id = object.id;
+	}
+	if (!id || !exists) {
+		return;
 	}
 
 	const allowed = await privileges.posts.can('posts:downvote', id, activitypub._constants.uid);
@@ -404,12 +510,35 @@ inbox.dislike = async (req) => {
 
 	activitypub.helpers.log(`[activitypub/inbox/dislike] id ${id} via ${actor}`);
 
-	await posts.downvote(id, actor);
+	try {
+		await posts.downvote(id, actor);
+	} catch (e) {
+		if (e.message === '[[error:already-voting-for-this-post]]') {
+			return;
+		}
+		throw e;
+	}
 	await activitypub.feps.announce(object.id, req.body);
 };
 
 inbox.announce = async (req) => {
 	let { actor, object, published, to, cc } = req.body;
+
+	// Collapse nested Announces: unwrap until we reach a non-Announce object
+	while (object.type === 'Announce') {
+		object = object.object;
+	}
+
+	// Resolve string object references (e.g., Announce wrapping a post URL)
+	if (typeof object === 'string') {
+		try {
+			object = await activitypub.helpers.resolveObjects(object);
+		} catch (e) {
+			activitypub.helpers.log(`[activitypub/inbox.announce] Failed to resolve object, using raw id: ${object}`);
+			object = { id: object };
+		}
+	}
+
 	activitypub.helpers.log(`[activitypub/inbox/announce] Parsing Announce(${object.type}) from ${actor}`);
 	let timestamp = new Date(published);
 	timestamp = timestamp.toString() !== 'Invalid Date' ? timestamp.getTime() : Date.now();
@@ -436,8 +565,34 @@ inbox.announce = async (req) => {
 	// Received via relay?
 	const fromRelay = await activitypub.relays.is(actor);
 
+	// Protections for non-Creates from category actors
+	const createish =
+		!object.type || object.type === 'Create' ||
+		activitypub._constants.acceptedPostTypes.includes(object.type);
+	if (!createish && cid) {
+		let id = object?.object?.id || object.object; // expecting object reference
+		const { id: localId } = await activitypub.helpers.resolveLocalId(id);
+		id = localId || id;
+
+		const exists = await posts.exists(id);
+		if (!exists) {
+			activitypub.helpers.log(`[activitypub/inbox.announce] Object (${id}) does not exist locally. Doing nothing.`);
+			return;
+		}
+
+		// Category actors can only publish activities concerning objects in said category
+		const _cid = await posts.getCidByPid(id);
+		if (_cid !== cid) {
+			return;
+		}
+	}
+
 	switch(true) {
 		case object.type === 'Like': {
+			if (!cid && !fromRelay) {
+				return;
+			}
+
 			const assertion = await activitypub.actors.assert(object.actor);
 			if (!assertion) {
 				throw new Error('[[error:activitypub.invalid-id]]');
@@ -445,7 +600,12 @@ inbox.announce = async (req) => {
 
 			req.body = object;
 			if (typeof req.body.object === 'string') {
-				req.body.object = await activitypub.helpers.resolveObjects(req.body.object);
+				try {
+					req.body.object = await activitypub.helpers.resolveObjects(req.body.object);
+				} catch (e) {
+					activitypub.helpers.log(`[activitypub/inbox.like] Failed to resolve like object, using raw id: ${req.body.object}`);
+					req.body.object = { id: req.body.object };
+				}
 			}
 
 			await inbox.like(req);
@@ -454,35 +614,46 @@ inbox.announce = async (req) => {
 		}
 
 		case object.type === 'Update': {
+			if (!cid && !fromRelay) {
+				return;
+			}
+
 			req.body = object;
+
+			if (process.env.hasOwnProperty('CI')) { // just for tests
+				req.res = {
+					locals: {},
+				};
+			}
+			req.res.locals.apAnnounced = true;
 			await inbox.update(req);
 			break;
 		}
 
 		case object.type === 'Delete': {
+			if (!cid && !fromRelay) {
+				return;
+			}
+
 			let id = object.object.id || object.object; // expecting object reference
 			const { id: localId } = await activitypub.helpers.resolveLocalId(id);
 			id = localId || id;
 
-			const exists = await posts.exists(id);
-			if (!exists) {
-				activitypub.helpers.log(`[activitypub/inbox.announce] Object (${id}) does not exist locally. Doing nothing.`);
-				break;
-			}
-
-			// Deletions must be made by an actor of the same origin
-			const actorHostname = new URL(actor).hostname;
+			/**
+			 * Deletions must be made by:
+			 *   - an actor of the same origin as announcer (mod deletion), OR
+			 *   - an actor of the same origin as the object id (use case: self-deletion), OR
+			 *   - (TBD) an actor in the announcer's moderators list
+			 */
+			const announcerHostname = new URL(actor).hostname;
+			const actorHostname = new URL(object.actor).hostname;
 			const objectHostname = new URL(id).hostname;
-			if (actorHostname !== objectHostname) {
+			const pass = (announcerHostname === actorHostname) || (actorHostname === objectHostname);
+			if (!pass) {
 				throw new Error('[[error:activitypub.origin-mismatch]]');
 			}
 
-			const _cid = await posts.getCidByPid(id);
-			if (!utils.isNumber(cid) && _cid !== cid) { // matching & remote categories only
-				throw new Error('[[error:invalid-cid]]');
-			}
-
-			const allowed = await privileges.categories.can('posts:edit', _cid, activitypub._constants.uid);
+			const allowed = await privileges.categories.can('posts:edit', cid, activitypub._constants.uid);
 			if (!allowed) {
 				throw new Error('[[error:no-privileges]]');
 			}
@@ -508,6 +679,10 @@ inbox.announce = async (req) => {
 		}
 
 		case object.type === 'Create': {
+			if (!cid && !fromRelay) {
+				return;
+			}
+
 			object = object.object;
 			// falls through
 		}
@@ -565,6 +740,11 @@ inbox.announce = async (req) => {
 			}
 		}
 	}
+
+	// Broadcast to relay followers if we have a pid
+	if (pid) {
+		await activitypub.feps.announce(pid, object, { fromRelay });
+	}
 };
 
 inbox.follow = async (req) => {
@@ -575,7 +755,7 @@ inbox.follow = async (req) => {
 	if (type === 'application') {
 		return activitypub.relays.handshake(req.body);
 	} else if (!['category', 'user'].includes(type)) {
-		throw new Error('[[error:activitypub.invalid-id]]');
+		return;
 	}
 
 	const assertion = await activitypub.actors.assert(actor);
@@ -606,7 +786,7 @@ inbox.follow = async (req) => {
 			user.syncFollowCounts(id, false, true),
 			user.syncFollowCounts(actor, true, false),
 		]);
-		activitypub.actors._followerCache.del(id);
+		activitypub.actors._followerCache.del(parseInt(id, 10));
 
 		await user.onFollow(actor, id);
 		activitypub.send('uid', id, actor, {
@@ -717,11 +897,24 @@ inbox.undo = async (req) => {
 
 	let { type: localType, id } = await helpers.resolveLocalId(object.object);
 
+	// If object is a Follow activity, check if the target is the instance actor (relay follow)
+	if (!localType && object?.type === 'Follow') {
+		const followTarget = typeof object.object === 'object' ? object.object.id : object.object;
+		if (followTarget === `${nconf.get('url')}/actor`) {
+			localType = 'application';
+		}
+	}
+
 	activitypub.helpers.log(`[activitypub/inbox/undo] ${type} ${localType && id ? `${localType} ${id}` : object.object} via ${actor}`);
 
 	switch (type) {
 		case 'Follow': {
 			switch (localType) {
+				case 'application': {
+					await activitypub.relays.removeFollower(actor);
+					break;
+				}
+
 				case 'user': {
 					const exists = await user.exists(id);
 					if (!exists) {
@@ -735,7 +928,7 @@ inbox.undo = async (req) => {
 						user.syncFollowCounts(actor, true, false),
 					]);
 					notifications.rescind(`follow:${id}:uid:${actor}`);
-					activitypub.actors._followerCache.del(id);
+					activitypub.actors._followerCache.del(parseInt(id, 10));
 					break;
 				}
 
@@ -757,7 +950,8 @@ inbox.undo = async (req) => {
 		case 'Like': {
 			const exists = await posts.exists(id);
 			if (localType !== 'post' || !exists) {
-				throw new Error('[[error:invalid-pid]]');
+				// Not a valid pid, ignore.
+				return;
 			}
 
 			const allowed = await privileges.posts.can('posts:upvote', id, activitypub._constants.uid);
@@ -810,7 +1004,14 @@ inbox.flag = async (req) => {
 	}
 
 	await Promise.all(objects.map(async (subject, index) => {
-		const { type, id } = await activitypub.helpers.resolveObjects(subject.id);
+		let type, id;
+		try {
+			({ type, id } = await activitypub.helpers.resolveObjects(subject.id));
+		} catch (e) {
+			activitypub.helpers.log(`[activitypub/inbox.flag] Failed to resolve flagged object, skipping: ${subject.id}`);
+			inbox._reject('Flag', objects[index], actor);
+			return;
+		}
 		try {
 			await flags.create(activitypub.helpers.mapToLocalType(type), id, actor, content);
 		} catch (e) {

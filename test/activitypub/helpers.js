@@ -76,9 +76,9 @@ Helpers.mocks.note = (override = {}) => {
 		url: id,
 		type: 'Note',
 		to: ['https://www.w3.org/ns/activitystreams#Public'],
-		cc: ['https://example.org/user/foobar/followers'],
+		cc: [`${Helpers.mocks._baseUrl}/user/foobar/followers`],
 		inReplyTo: null,
-		attributedTo: 'https://example.org/user/foobar',
+		attributedTo: `${Helpers.mocks._baseUrl}/user/foobar`,
 		name: utils.generateUUID(),
 		content: `<p>${utils.generateUUID()}</p>`,
 		published: new Date().toISOString(),
@@ -145,6 +145,31 @@ Helpers.mocks.accept = (actor, object) => {
 		'@context': 'https://www.w3.org/ns/activitystreams',
 		id,
 		type: 'Accept',
+		to: ['https://www.w3.org/ns/activitystreams#Public'],
+		actor,
+		object,
+	};
+
+	return { activity };
+};
+
+Helpers.mocks.undo = (override = {}) => {
+	let actor = override.actor;
+	let object = override.object;
+	if (!actor) {
+		({ id: actor } = Helpers.mocks.person());
+	}
+	if (!object) {
+		({ id: object } = Helpers.mocks.note());
+	}
+
+	const uuid = utils.generateUUID();
+	const id = `${Helpers.mocks._baseUrl}/undo/${uuid}`;
+
+	const activity = {
+		'@context': 'https://www.w3.org/ns/activitystreams',
+		id,
+		type: 'Undo',
 		to: ['https://www.w3.org/ns/activitystreams#Public'],
 		actor,
 		object,

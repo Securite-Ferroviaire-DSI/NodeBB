@@ -38,6 +38,9 @@ define('notifications', [
 		}
 		callback = callback || function () {};
 		api.get('/notifications').then((data) => {
+			// resync the unread count in case a socket push was missed
+			// or a notification was rescinded server-side
+			Notifications.updateNotifCount(data.unread.length);
 			const notifs = data.unread.concat(data.read).sort(function (a, b) {
 				return parseInt(a.datetime, 10) > parseInt(b.datetime, 10) ? -1 : 1;
 			});
@@ -61,13 +64,18 @@ define('notifications', [
 						const nid = notifEl.attr('data-nid');
 						markNotification(nid, true);
 					});
-					components.get('notifications').on('click', '.mark-all-read', () => {
-						Notifications.markAllRead();
-						triggerEl?.dropdown('toggle');
-					});
-					components.get('notifications').on('click', `[href="${config.relative_path}/notifications"]`, () => {
-						triggerEl?.dropdown('toggle');
-					});
+					const notifComponent = components.get('notifications');
+					notifComponent
+						.off('click', '.mark-all-read')
+						.on('click', '.mark-all-read', () => {
+							Notifications.markAllRead();
+							triggerEl?.dropdown('toggle');
+						});
+					notifComponent
+						.off('click', `[href="${config.relative_path}/notifications"]`)
+						.on('click', `[href="${config.relative_path}/notifications"]`, () => {
+							triggerEl?.dropdown('toggle');
+						});
 
 					Notifications.handleUnreadButton(notifList);
 
@@ -75,7 +83,7 @@ define('notifications', [
 						notifications: notifs,
 						list: notifList,
 					});
-					callback();
+					callback({ unread: data.unread, read: data.read });
 				});
 			});
 		}).catch(alerts.error);
@@ -95,17 +103,29 @@ define('notifications', [
 		});
 	};
 
-	Notifications.onNewNotification = function (notifData) {
+	Notifications.onNewNotification = async function (data) {
+		const { notification: notifData, unreadCount } = data;
 		if (ajaxify.currentPage === 'notifications') {
 			ajaxify.refresh();
 		}
-		if (ajaxify.data.template.chats && parseInt(ajaxify.data.roomId, 10) === parseInt(notifData.roomId, 10)) {
+		const { template } = ajaxify.data;
+		if (template.chats && String(ajaxify.data.roomId) === String(notifData.roomId)) {
+			// user is already looking at this room, mark the notification read
+			// instead of leaving it unread until the next room load
+			if (notifData.nid) {
+				markNotification(notifData.nid, true);
+			}
 			return;
 		}
 
-		api.get('/notifications/count').then(({ unread }) => {
-			Notifications.updateNotifCount(unread);
-		}).catch(alerts.error);
+		if (template.topic && String(ajaxify.data.tid) === String(notifData.tid)) {
+			await socket.emit('topics.markTopicNotificationsRead', [notifData.tid]);
+			return;
+		}
+
+		if (unreadCount !== undefined) {
+			Notifications.updateNotifCount(unreadCount);
+		}
 
 		if (!unreadNotifs[notifData.nid]) {
 			unreadNotifs[notifData.nid] = notifData;
