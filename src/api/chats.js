@@ -163,6 +163,7 @@ chatsAPI.update = async (caller, data) => {
 	if (data.hasOwnProperty('groups')) {
 		if (roomData.public && isAdmin) {
 			await db.setObjectField(`chat:room:${data.roomId}`, 'groups', JSON.stringify(data.groups));
+			await messaging.removeUsersWithoutAccess(data.roomId);
 		}
 	}
 	if (isAdmin) {
@@ -450,6 +451,11 @@ chatsAPI.deleteMessage = async (caller, { mid }) => {
 chatsAPI.restoreMessage = async (caller, { mid }) => {
 	await messaging.canDelete(mid, caller.uid);
 	await messaging.restoreMessage(mid, caller.uid);
+};
+
+chatsAPI.purgeMessage = async (caller, { mid }) => {
+	await messaging.canDelete(mid, caller.uid);
+	await messaging.purgeMessage(mid);
 };
 
 chatsAPI.pinMessage = async (caller, { roomId, mid }) => {
